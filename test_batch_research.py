@@ -16,8 +16,8 @@ from rapidfuzz import fuzz, process
 from sentence_transformers import SentenceTransformer, util
 import winsound
 
-# v11 "Ported Top-to-Bottom Layout Sorting & Robust Noise Cleaning"
-## test on 11 files on some new pdfs
+# v12 "Change LLM models For Faster Processing"
+## test on all pdfs
 
 # Load lightweight local embedding model for Semantic Similarity
 semantic_model = SentenceTransformer("all-MiniLM-L6-v2")
@@ -29,7 +29,7 @@ OPENROUTER_BASE_URL = os.getenv(
     "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"
 )
 
-BASE_PDF_FOLDER = Path(r"D:\Intern_Sem7\test_pdfs")
+BASE_PDF_FOLDER = Path(r"D:\Intern_Sem7\INDIGO courses")
 CATALOG_PATH = Path("catalog_cards.json")
 OUTPUT_CSV_PATH = Path("research_course_summaries.csv")
 
@@ -37,10 +37,24 @@ pytesseract.pytesseract.tesseract_cmd = (
     r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 )
 
-# Benchmark Models Configuration
-MODEL_1 = {"type": "ollama", "name": "qwen2.5:7b"}
-MODEL_2 = {"type": "ollama", "name": "mistral:latest"}
-MODEL_3 = {"type": "openrouter", "name": "inclusionai/ling-3.0-flash-vl:free"}
+# ==========================================
+# OPTIMIZED BENCHMARK MODEL CONFIGURATION
+# ==========================================
+MODEL_1 = {
+    "type": "ollama",
+    "name": "llama3.2:3b",  # Super fast local model (~2-4 seconds per doc)
+}
+
+MODEL_2 = {
+    "type": "openrouter_fallback",
+    "primary": "google/gemma-3-27b-it:free",  # Primary free model
+    "backup": "deepseek/deepseek-chat",  # Micro-cost paid fallback (~$0.0002)
+}
+
+MODEL_3 = {
+    "type": "openrouter",
+    "name": "deepseek/deepseek-chat",  # Direct SOTA Paid call
+}
 
 DISABLED_MODELS = {
     "MODEL_1": False,
@@ -428,6 +442,7 @@ def generate_llm_summary(
     course_title: str,
     full_cleaned_text: str,
 ) -> tuple[str, float]:
+    """Generates LLM summary with automatic OpenRouter native failover and local Python retries."""
     if DISABLED_MODELS.get(model_key, False):
         return None, 0.0
 
@@ -435,6 +450,7 @@ def generate_llm_summary(
     start_time = time.time()
 
     try:
+        # --- SCENARIO A: LOCAL OLLAMA ---
         if model_config["type"] == "ollama":
             response = ollama.chat(
                 model=model_config["name"],
@@ -445,6 +461,25 @@ def generate_llm_summary(
             )
             result = response["message"]["content"].strip()
 
+        # --- SCENARIO B: OPENROUTER WITH AUTOMATIC FALLBACK ARRAY ---
+        elif model_config["type"] == "openrouter_fallback":
+            # Passing an array in 'extra_body' instructs OpenRouter to failover seamlessly on 429/5xx errors
+            response = openrouter_client.chat.completions.create(
+                model=model_config["primary"],
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
+                extra_body={
+                    "models": [
+                        model_config["primary"],
+                        model_config["backup"],
+                    ]
+                },
+            )
+            result = response.choices[0].message.content.strip()
+
+        # --- SCENARIO C: STANDARD SINGLE OPENROUTER CALL ---
         elif model_config["type"] == "openrouter":
             response = openrouter_client.chat.completions.create(
                 model=model_config["name"],
@@ -460,6 +495,8 @@ def generate_llm_summary(
 
     except Exception as e:
         err_msg = str(e).lower()
+
+        # Catch quota/rate limit errors if OpenRouter failover exhausted
         if any(
             kw in err_msg
             for kw in [
@@ -470,10 +507,31 @@ def generate_llm_summary(
                 "balance",
             ]
         ):
+            print(
+                f"   ⚠️ Rate limit/Quota hit on {model_key}. Disabling model for this run."
+            )
             DISABLED_MODELS[model_key] = True
             return None, round(time.time() - start_time, 2)
 
-        return f"[Error: {str(e)}]", round(time.time() - start_time, 2)
+        # Catch general API errors and attempt emergency fallback to local Ollama
+        print(
+            f"   ⚠️ OpenRouter API failed ({e}). Falling back to local Ollama ({MODEL_1['name']})..."
+        )
+        try:
+            fallback_resp = ollama.chat(
+                model=MODEL_1["name"],
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
+            )
+            result = f"[Fallback-Local] {fallback_resp['message']['content'].strip()}"
+            return result, round(time.time() - start_time, 2)
+        except Exception as local_err:
+            return (
+                f"[Error: {str(e)} | Local Fallback Error: {str(local_err)}]",
+                round(time.time() - start_time, 2),
+            )
 
 
 def main():
