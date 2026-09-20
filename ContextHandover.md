@@ -59,7 +59,7 @@ The pipeline benchmarks **3 distinct model endpoints** simultaneously:
 
 | Model ID | Endpoint / Type | Model Name | Primary Task / Role |
 | --- | --- | --- | --- |
-| **MODEL_1** | Ollama (Local) | `qwen2.5:7b` | **1.** Formats raw OCR into Markdown outlines (`format_outline_with_llm`)
+| **MODEL_1** | Ollama (Local) | `qwen2.5:7b` | **1.** Formats raw OCR into Markdown outlines (`format_outline_with_llm`)**2.** Generates brochure summary & latency metrics |
 | **MODEL_2** | Ollama (Local) | `mistral:latest` | Generates brochure summary & latency metrics |
 | **MODEL_3** | OpenRouter (Cloud Free) | `inclusionai/ling-3.0-flash-vl:free` | Generates brochure summary & latency metrics |
 
