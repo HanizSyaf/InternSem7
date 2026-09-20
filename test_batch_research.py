@@ -14,8 +14,8 @@ from rapidfuzz import process, fuzz
 from dotenv import load_dotenv
 from sentence_transformers import SentenceTransformer, util
 from IPython.display import display, Markdown
-## v8
-# attempting on 7 files
+## v9- fixing hybrid img-txt pdf
+# attempting on 11 files
 
 # Load lightweight local embedding model for Semantic Similarity
 semantic_model = SentenceTransformer("all-MiniLM-L6-v2")
@@ -207,6 +207,35 @@ STRICT FORMATTING RULES:
         print(f"Ollama formatting error: {e}")
         return raw_schedule_text
 
+def extract_text_from_page_images(page) -> str:
+    """Extracts text from all embedded images inside a PDF page using PyMuPDF and Tesseract OCR."""
+    ocr_text = []
+    
+    # Iterate through all images embedded on the page
+    image_list = page.get_images(full=True)
+    
+    if image_list:
+        for img_info in image_list:
+            xref = img_info[0]
+            try:
+                base_image = page.parent.extract_image(xref)
+                image_bytes = base_image["image"]
+                
+                # Open image with Pillow and run Tesseract OCR
+                image = Image.open(io.BytesIO(image_bytes))
+                extracted = pytesseract.image_to_string(image).strip()
+                if extracted:
+                    ocr_text.append(extracted)
+            except Exception:
+                continue
+
+    # Fallback: If no standalone image objects were extracted, render the full page to PNG for OCR
+    if not ocr_text:
+        pix = page.get_pixmap(dpi=300)
+        img = Image.open(io.BytesIO(pix.tobytes("png")))
+        ocr_text.append(pytesseract.image_to_string(img).strip())
+        
+    return "\n".join(ocr_text).strip()
 
 def extract_pdf_data(pdf_path: Path) -> tuple[str, str, str, str, float]:
     """Extracts PDF text, classifies pdf_type ('txt' vs 'img'), cleans noise, and parses components."""
@@ -216,17 +245,32 @@ def extract_pdf_data(pdf_path: Path) -> tuple[str, str, str, str, float]:
     ocr_page_count = 0
     total_pages = len(doc)
 
+    schedule_keywords = ["module", "schedule", "outline", "day 1", "agenda", "session", "topic"]
+
     for page in doc:
         text = page.get_text().strip()
-        if len(text) > 50:
-            full_text.append(text)
-        else:
+        
+        # Scenario A: Scanned Page (Pure Image PDF)
+        if len(text) <= 50:
             ocr_page_count += 1
             pix = page.get_pixmap()
             img = Image.open(io.BytesIO(pix.tobytes("png")))
             full_text.append(pytesseract.image_to_string(img))
+            
+        # Scenario B: Hybrid Page (Text present, but schedule might be an embedded image)
+        else:
+            has_schedule_kw = any(kw in text.lower() for kw in schedule_keywords)
+            image_list = page.get_images(full=True)
+            
+            # If text is missing schedule keywords AND page has embedded images, trigger OCR on images
+            if not has_schedule_kw and len(image_list) > 0:
+                ocr_img_text = extract_text_from_page_images(page)
+                if ocr_img_text:
+                    text += f"\n\n--- [IMAGE OCR CONTENT] ---\n{ocr_img_text}"
+            
+            full_text.append(text)
 
-    # Classify pdf_type: 'img' if >50% pages required OCR, else 'txt'
+    # Classify pdf_type: 'img' if >50% pages required full-page OCR, else 'txt'
     pdf_type = "img" if (ocr_page_count / max(total_pages, 1)) > 0.5 else "txt"
 
     raw_combined = "\n\n".join(full_text)
