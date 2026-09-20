@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 from sentence_transformers import SentenceTransformer, util
 from IPython.display import display, Markdown
 ## v8
+# attempting on 7 files
 
 # Load lightweight local embedding model for Semantic Similarity
 semantic_model = SentenceTransformer("all-MiniLM-L6-v2")
