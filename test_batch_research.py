@@ -14,8 +14,8 @@ from rapidfuzz import process, fuzz
 from dotenv import load_dotenv
 from sentence_transformers import SentenceTransformer, util
 from IPython.display import display, Markdown
-## v9- fixing hybrid img-txt pdf
-# attempting on 11 files
+# v10 "Fixing undetected overview & peculiar prog outline format"
+## testing on 6 pdfs, some new ones
 
 # Load lightweight local embedding model for Semantic Similarity
 semantic_model = SentenceTransformer("all-MiniLM-L6-v2")
@@ -64,16 +64,7 @@ OVERVIEW_START_PATTERNS = [
 OVERVIEW_END_PATTERNS = [
     r"learning\s+objective[s]?", r"workshop\s+objective[s]?", r"course\s+objective[s]?",
     r"program\s+outline", r"course\s+schedule", r"pre-requisite[s]?", r"prerequisite[s]?",
-    r"learning\s+outcome[s]?", r"expected\s+outcome[s]?", r"target\s+audience"
-]
-
-OUTLINE_START_PATTERNS = [
-    r"program\s+outline", r"course\s+schedule", r"agenda", 
-    r"course\s+outline", r"workshop\s+outline", r"modules", r"course\s+contents"
-]
-OUTLINE_END_PATTERNS = [
-    r"pre-requisite[s]?", r"prerequisite[s]?", r"target\s+audience", 
-    r"who\s+should\s+attend", r"learning\s+outcome[s]?", r"trainer\s+profile", r"about\s+elite\s+indigo"
+    r"learning\s+outcome[s]?", r"expected\s+outcome[s]?", r"target\s+audience", r"duration"
 ]
 
 def load_catalog(path: Path) -> list:
@@ -83,7 +74,6 @@ def load_catalog(path: Path) -> list:
 def fix_spaced_text(text: str) -> str:
     """Collapses spaced-out characters (e.g., 'O v e r v i e w' -> 'Overview') 
     while preserving regular single-space gaps between words."""
-    # Replaces single-letter space sequences (e.g., 'O v e r v i e w') with merged words
     return re.sub(r'(?<=\b[A-Za-z])\s+(?=[A-Za-z]\b)', '', text)
 
 def clean_pdf_noise(raw_text: str) -> str:
@@ -99,15 +89,15 @@ def clean_pdf_noise(raw_text: str) -> str:
     text = re.sub(r'(?i)why\s+choose\s+us\?.*?(?=\n\n|\Z)', '', text, flags=re.DOTALL)
     return re.sub(r'\n+', '\n', text).strip()
 
-
 def extract_targeted_overview(full_text: str) -> str:
     """Extracts text strictly starting from 'Overview' until 'Learning Objectives/Outcome'."""
-    start_regex = r"(?i)(" + "|".join(OVERVIEW_START_PATTERNS) + r")"
-    end_regex = r"(?i)(" + "|".join(OVERVIEW_END_PATTERNS) + r")"
+    start_regex = r"(?i)(?:[•\-*\s]*)(?:" + "|".join(OVERVIEW_START_PATTERNS) + r")"
+    end_regex = r"(?i)(?:[•\-*\s]*)(?:" + "|".join(OVERVIEW_END_PATTERNS) + r")"
     
     start_match = re.search(start_regex, full_text)
     if not start_match:
-        paragraphs = [p.strip() for p in full_text.split('\n\n') if len(p.strip()) > 80]
+        # Fallback: grab first substantive block before objectives or duration
+        paragraphs = [p.strip() for p in full_text.split('\n\n') if len(p.strip()) > 60]
         return paragraphs[0] if paragraphs else full_text[:500].replace("\n", " ").strip()
         
     start_idx = start_match.end()
@@ -118,11 +108,12 @@ def extract_targeted_overview(full_text: str) -> str:
     return re.sub(r"\s+", " ", clean_overview).strip()
 
 def extract_raw_schedule_block(full_text: str) -> str:
-    """Extracts complete multi-day schedule blocks and pre-cleans timing/layout noise."""
-    # 1. Locate start of schedule content
+    """Extracts complete multi-day or multi-session schedule blocks and pre-cleans timing/layout noise."""
     start_patterns = [
         r"(?i)module\s+1", r"(?i)course\s+schedule", 
-        r"(?i)program\s+outline", r"(?i)course\s+outline"
+        r"(?i)program\s+outline", r"(?i)course\s+outline",
+        r"(?i)morning\s+session", r"(?i)afternoon\s+session",
+        r"(?i)agenda", r"(?i)games\s*&\s*activities"
     ]
     
     start_idx = 0
@@ -132,63 +123,74 @@ def extract_raw_schedule_block(full_text: str) -> str:
             start_idx = match.start()
             break
 
-    # 2. Extract slice up to 6000 characters to cover multi-day PDFs without premature cutoff
     raw = full_text[start_idx:start_idx + 6000]
+    raw = re.split(r"(?i)(about\s+elite\s+indigo|contact\s+us|for\_more\_100%_hrdf|testimonials)", raw)[0]
 
-    # 3. Strip end-of-document marketing footers
-    raw = re.split(r"(?i)(about\s+elite\s+indigo|contact\s+us|for\_more\_100%_hrdf)", raw)[0]
-
-    # 4. Remove schedule metadata noise & headers
     noise_patterns = [
         r"(?i)DAY\s*/\s*TIME\s*DESCRIPTION",
         r"(?i)\d+\s*(Hours?|Mins?|Minutes?)\b",
-        r"(?i)30\s*Minutes\b",
+        r"(?i)OVERALL\s+TIME\s*:\s*ABOUT\s*\d+.*?\n",
         r"(?i)Opening\s*&\s*Recap",
         r"(?i)Summary\s*and\s*End\s*of\s*Day\s*\d+",
         r"(?i)Continued\s+on\s+Next\s+Page",
-        r"(?i)Lunch(\s*break)?"
+        r"(?i)Lunch(\s*break)?",
+        r"(?i)Buffet\s+Lunch\s+is\s+served\.?"
     ]
     for pattern in noise_patterns:
         raw = re.sub(pattern, " ", raw)
 
-    # 5. Clean up extra whitespace
     raw = re.sub(r"\n\s*\n", "\n", raw)
     return raw.strip()
 
 def format_outline_with_llm(raw_schedule_text: str) -> str:
-    """Formats cleaned outline text into structured Markdown using local Ollama without dropping modules."""
+    """Formats cleaned outline text into structured Markdown using local Ollama.
+    Dynamically chooses between Module-based or Session-based formats based on input structure."""
     if not raw_schedule_text or len(raw_schedule_text) < 20:
         return raw_schedule_text
 
     system_prompt = """You are a precise syllabus parser. Transform raw OCR course schedule text into clean, structured Markdown.
 
-STRICT FORMATTING RULES:
-1. COMPLETE MODULE COVERAGE (CRITICAL): 
-   - You MUST include EVERY single module present in the input text (from Module 1 up to the last Module). NEVER truncate or skip modules.
-2. ACCURATE DAY ASSIGNMENTS:
-   - Identify explicit 'Day 1' and 'Day 2' markers in the text.
-   - For 2-day courses: Day 1 contains Modules 1 to 3; Day 2 contains Modules 4 to 5.
-3. REMOVE NOISE:
-   - Omit 'Registration', 'Ice-Breaking', 'Lunch', 'Break', 'Summary and End of Course', 'Opening & Recap', 'Negotiating With the Devil', course titles, page headers.
-4. FIX OCR SPACING & TYPOS:
-   - Fix merged words (e.g., 'EssentialsFundamentals' -> 'Essentials', 'duringNegotiation' -> 'during Negotiation').
-5. STRICT OUTPUT FORMAT ONLY:
-   Duration: X Days
+CRITICAL INSTRUCTION: Analyze the raw text and select the MOST SUITABLE output format from the two options below:
 
-   ### Day 1:
-   * Module 1: Title
-     - Sub-topic description
-   * Module 2: Title
-     - Sub-topic description
+--- FORMAT OPTION 1: IF THE PDF USES MODULES ---
+Use this format ONLY if the document explicitly uses 'Module 1', 'Module 2', etc.
 
+Duration: X Days
 
-   ### Day 2:
-   * Module n: Title
-     - Sub-topic description
-   * Module n+1: Title
-     - Sub-topic description
-   * Module n+2: Title
-     - Sub-topic description"""
+### Day 1:
+* Module 1: Title
+  - Sub-topic description
+* Module 2: Title
+  - Sub-topic description
+
+### Day 2:
+* Module n: Title
+  - Sub-topic description
+* Module n+1: Title
+  - Sub-topic description
+* Module n+2: Title
+  - Sub-topic description
+
+--- FORMAT OPTION 2: IF THE PDF USES SESSIONS (MORNING/AFTERNOON OR TIME BLOCKS) ---
+Use this format if the document uses 'Morning Session', 'Afternoon Session', or general workshop topic headers instead of numbered modules.
+
+Duration: X Day(s)
+
+### Morning Session:
+* MAIN TOPIC / WORKSHOP TITLE
+  - Sub-topic or activity description
+  - Sub-topic or activity description
+
+### Afternoon Session:
+* MAIN TOPIC / WORKSHOP TITLE
+  - Sub-topic or activity description
+  - Sub-topic or activity description
+
+--- STRICT RULES ---
+1. COMPLETE COVERAGE: Include ALL topics, modules, or session activities present in the source text. NEVER omit content.
+2. REMOVE NOISE: Omit 'Registration', 'Break', 'Buffet Lunch', 'Group photos', page headers, and contact details.
+3. FIX OCR SPACING & TYPOS: Fix concatenated words (e.g., 'KEYBOARDWORKSHOP' -> 'KEYBOARD WORKSHOP').
+4. DO NOT invent "Module 1" if the source text is structured as Morning/Afternoon Sessions. Respect the original document structure."""
 
     try:
         response = ollama.chat(
@@ -198,7 +200,7 @@ STRICT FORMATTING RULES:
                 {"role": "user", "content": f"Raw Schedule Text:\n{raw_schedule_text}"}
             ],
             options={
-                "num_predict": 1500,  # Increases max output generation token limit to prevent cutoffs
+                "num_predict": 1500,
                 "temperature": 0.0
             }
         )
@@ -210,8 +212,6 @@ STRICT FORMATTING RULES:
 def extract_text_from_page_images(page) -> str:
     """Extracts text from all embedded images inside a PDF page using PyMuPDF and Tesseract OCR."""
     ocr_text = []
-    
-    # Iterate through all images embedded on the page
     image_list = page.get_images(full=True)
     
     if image_list:
@@ -220,8 +220,6 @@ def extract_text_from_page_images(page) -> str:
             try:
                 base_image = page.parent.extract_image(xref)
                 image_bytes = base_image["image"]
-                
-                # Open image with Pillow and run Tesseract OCR
                 image = Image.open(io.BytesIO(image_bytes))
                 extracted = pytesseract.image_to_string(image).strip()
                 if extracted:
@@ -229,7 +227,6 @@ def extract_text_from_page_images(page) -> str:
             except Exception:
                 continue
 
-    # Fallback: If no standalone image objects were extracted, render the full page to PNG for OCR
     if not ocr_text:
         pix = page.get_pixmap(dpi=300)
         img = Image.open(io.BytesIO(pix.tobytes("png")))
@@ -245,7 +242,7 @@ def extract_pdf_data(pdf_path: Path) -> tuple[str, str, str, str, float]:
     ocr_page_count = 0
     total_pages = len(doc)
 
-    schedule_keywords = ["module", "schedule", "outline", "day 1", "agenda", "session", "topic"]
+    schedule_keywords = ["module", "schedule", "outline", "day 1", "agenda", "session", "topic", "morning", "afternoon"]
 
     for page in doc:
         text = page.get_text().strip()
@@ -253,16 +250,15 @@ def extract_pdf_data(pdf_path: Path) -> tuple[str, str, str, str, float]:
         # Scenario A: Scanned Page (Pure Image PDF)
         if len(text) <= 50:
             ocr_page_count += 1
-            pix = page.get_pixmap()
+            pix = page.get_pixmap(dpi=300)
             img = Image.open(io.BytesIO(pix.tobytes("png")))
             full_text.append(pytesseract.image_to_string(img))
             
-        # Scenario B: Hybrid Page (Text present, but schedule might be an embedded image)
+        # Scenario B: Hybrid Page (Text present, but schedule or sections might be embedded images)
         else:
             has_schedule_kw = any(kw in text.lower() for kw in schedule_keywords)
             image_list = page.get_images(full=True)
             
-            # If text is missing schedule keywords AND page has embedded images, trigger OCR on images
             if not has_schedule_kw and len(image_list) > 0:
                 ocr_img_text = extract_text_from_page_images(page)
                 if ocr_img_text:
@@ -270,7 +266,6 @@ def extract_pdf_data(pdf_path: Path) -> tuple[str, str, str, str, float]:
             
             full_text.append(text)
 
-    # Classify pdf_type: 'img' if >50% pages required full-page OCR, else 'txt'
     pdf_type = "img" if (ocr_page_count / max(total_pages, 1)) > 0.5 else "txt"
 
     raw_combined = "\n\n".join(full_text)
@@ -373,7 +368,6 @@ def main():
             sum3, time3 = generate_llm_summary(MODEL_3, "MODEL_3", matched["title"], cleaned_text)
 
             # METRICS COMPUTATION
-            # Evaluates generated summaries against a rich reference ground truth (Overview + Outline)
             rich_reference_text = f"{orig_overview}\n\nSyllabus Outline:\n{outline_summary}"
             
             print("  └─ Calculating Semantic Similarity Scores...")
@@ -421,6 +415,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
