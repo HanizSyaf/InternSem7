@@ -1,3 +1,4 @@
+import argparse
 import io
 import json
 import os
@@ -15,9 +16,7 @@ import pytesseract
 from rapidfuzz import fuzz, process
 from sentence_transformers import SentenceTransformer, util
 import winsound
-
-# v12 "Change LLM models For Faster Processing"
-## test on all pdfs
+#v13-partition pdf, 4 part
 
 # Load lightweight local embedding model for Semantic Similarity
 semantic_model = SentenceTransformer("all-MiniLM-L6-v2")
@@ -29,40 +28,37 @@ OPENROUTER_BASE_URL = os.getenv(
     "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"
 )
 
-BASE_PDF_FOLDER = Path(r"D:\Intern_Sem7\INDIGO courses")
+BASE_DIR = Path(r"D:\Intern_Sem7")
 CATALOG_PATH = Path("catalog_cards.json")
-OUTPUT_CSV_PATH = Path("research_course_summaries.csv")
 
 pytesseract.pytesseract.tesseract_cmd = (
     r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 )
 
 # ==========================================
-# OPTIMIZED BENCHMARK MODEL CONFIGURATION
+# BENCHMARK MODEL CONFIGURATION
 # ==========================================
 MODEL_1 = {
     "type": "ollama",
-    "name": "llama3.2:3b",  # Super fast local model (~2-4 seconds per doc), faster than qwen2.5
+    "name": "llama3.2:3b",
 }
 
 MODEL_2 = {
-    "type": "openrouter_fallback",
-    "name": "google/gemma-3-27b-it:free",  # Primary free model
+    "type": "openrouter",
+    "name": "nvidia/nemotron-3-super-120b-a12b:free", 
 }
 
 MODEL_3 = {
     "type": "openrouter",
-    "name": "deepseek/deepseek-chat",  # Direct SOTA Paid call
+    "name": "deepseek/deepseek-chat",
 }
 
 DISABLED_MODELS = {
     "MODEL_1": False,
     "MODEL_2": False,
     "MODEL_3": False,
-    "FORMATTER": False,
 }
 
-# SYSTEM PROMPT: Instructs LLM to read full course details and filter corporate noise
 SYSTEM_PROMPT = """You are an expert curriculum marketing specialist.
 Your task is to analyze the entire course document and generate a new, engaging 150-word brochure summary.
 
@@ -77,7 +73,6 @@ openrouter_client = OpenAI(
     base_url=OPENROUTER_BASE_URL, api_key=OPENROUTER_API_KEY
 )
 
-# Regex Patterns for Boundary Extraction
 OVERVIEW_START_PATTERNS = [
     r"program\s+overview",
     r"course\s+overview",
@@ -108,19 +103,11 @@ def load_catalog(path: Path) -> list:
 
 
 def fix_spaced_text(text: str) -> str:
-    """Collapses spaced-out characters (e.g., 'O v e r v i e w' -> 'Overview')
-
-    while preserving regular single-space gaps between words.
-    """
     return re.sub(r"(?<=\b[A-Za-z])\s+(?=[A-Za-z]\b)", "", text)
 
 
 def clean_pdf_noise(raw_text: str) -> str:
-    """Pre-processes text to remove spaced characters, URLs, emails, HRDF badges, and corporate footers."""
-    # 1. Fix single-character spaced OCR/PDF text first
     text = fix_spaced_text(raw_text)
-
-    # 2. Existing noise cleaning steps
     text = re.sub(r"https?://\S+|www\.\S+", "", text)
     text = re.sub(
         r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b", "", text
@@ -130,36 +117,19 @@ def clean_pdf_noise(raw_text: str) -> str:
         "",
         text,
     )
-
-    # FIX: Use multiline end-of-line anchor ($) instead of unbounded DOTALL matching
-    # to prevent accidentally wiping out subsequent pages of valid syllabus text
     text = re.sub(r"(?i)about\s+elite\s+indigo.*$", "", text, flags=re.MULTILINE)
     text = re.sub(r"(?i)why\s+choose\s+us\?.*$", "", text, flags=re.MULTILINE)
     return re.sub(r"\n+", "\n", text).strip()
 
 
 def extract_page_text_ordered(page) -> str:
-    """Extracts text blocks sorted top-to-bottom, left-to-right to preserve visual reading order."""
     blocks = page.get_text("blocks")
-
-    # Sort blocks primarily by vertical Y-top position (rounded to nearest 10px to group line rows),
-    # and secondarily by horizontal X-left position
     blocks.sort(key=lambda b: (round(b[1], -1), b[0]))
-
-    page_lines = []
-    for b in blocks:
-        clean_block = b[4].strip()
-        if clean_block:
-            page_lines.append(clean_block)
-
+    page_lines = [b[4].strip() for b in blocks if b[4].strip()]
     return "\n".join(page_lines)
 
 
 def extract_targeted_overview(full_text: str) -> str:
-    """Extracts text starting from 'Overview' until 'Learning Objectives' or 'Duration',
-
-    accounting for PDF text-layer reading order glitches where headers concatenate.
-    """
     start_regex = (
         r"(?i)(?:[•\-*\s]*)(?:" + "|".join(OVERVIEW_START_PATTERNS) + r")"
     )
@@ -179,7 +149,6 @@ def extract_targeted_overview(full_text: str) -> str:
     start_idx = start_match.end()
     text_after_start = full_text[start_idx:]
 
-    # Clean out consecutive heading text right after "Overview" (e.g., "OverviewLearning Objectives")
     text_after_start = re.sub(
         r"^(?:Learning Objectives|Duration|Course Schedule|Program Outline)\s*",
         "",
@@ -205,7 +174,6 @@ def extract_targeted_overview(full_text: str) -> str:
 
 
 def extract_raw_schedule_block(full_text: str) -> str:
-    """Extracts complete multi-day or multi-session schedule blocks and pre-cleans timing/layout noise."""
     start_patterns = [
         r"(?i)module\s+1",
         r"(?i)course\s+schedule",
@@ -243,67 +211,41 @@ def extract_raw_schedule_block(full_text: str) -> str:
     for pattern in noise_patterns:
         raw = re.sub(pattern, " ", raw)
 
-    raw = re.sub(r"\n\s*\n", "\n", raw)
-    return raw.strip()
+    return re.sub(r"\n\s*\n", "\n", raw).strip()
 
 
 def format_outline_with_llm(raw_schedule_text: str) -> str:
-    """Formats cleaned outline text into structured Markdown using local Ollama.
-
-    Dynamically chooses between Module-based or Session-based formats based on input structure.
-    """
     if not raw_schedule_text or len(raw_schedule_text) < 20:
         return raw_schedule_text
 
-    system_prompt = """You are a precise syllabus parser. Transform raw OCR course schedule text into clean, structured Markdown.
+    formatting_prompt = """You are a precise syllabus parser. Transform raw OCR course schedule text into clean, structured Markdown.
 
-CRITICAL INSTRUCTION: Analyze the raw text and select the MOST SUITABLE output format from the two options below:
+CRITICAL INSTRUCTION: Analyze the raw text and select the MOST SUITABLE output format:
 
 --- FORMAT OPTION 1: IF THE PDF USES MODULES ---
-Use this format ONLY if the document explicitly uses 'Module 1', 'Module 2', etc.
-
 Duration: X Days
 
 ### Day 1:
 * Module 1: Title
   - Sub-topic description
-* Module 2: Title
-  - Sub-topic description
 
-### Day 2:
-* Module n: Title
-  - Sub-topic description
-* Module n+1: Title
-  - Sub-topic description
-* Module n+2: Title
-  - Sub-topic description
-
---- FORMAT OPTION 2: IF THE PDF USES SESSIONS (MORNING/AFTERNOON OR TIME BLOCKS) ---
-Use this format if the document uses 'Morning Session', 'Afternoon Session', or general workshop topic headers instead of numbered modules.
-
+--- FORMAT OPTION 2: IF THE PDF USES SESSIONS ---
 Duration: X Day(s)
 
 ### Morning Session:
 * MAIN TOPIC / WORKSHOP TITLE
   - Sub-topic or activity description
-  - Sub-topic or activity description
-
-### Afternoon Session:
-* MAIN TOPIC / WORKSHOP TITLE
-  - Sub-topic or activity description
-  - Sub-topic or activity description
 
 --- STRICT RULES ---
-1. COMPLETE COVERAGE: Include ALL topics, modules, or session activities present in the source text. NEVER omit content.
-2. REMOVE NOISE: Omit 'Registration', 'Break', 'Buffet Lunch', 'Group photos', page headers, and contact details.
-3. FIX OCR SPACING & TYPOS: Fix concatenated words (e.g., 'KEYBOARDWORKSHOP' -> 'KEYBOARD WORKSHOP').
-4. DO NOT invent "Module 1" if the source text is structured as Morning/Afternoon Sessions. Respect the original document structure."""
+1. Include ALL topics from source text.
+2. Omit 'Registration', 'Break', 'Lunch', and page footers.
+3. Fix concatenated OCR words."""
 
     try:
         response = ollama.chat(
-            model=MODEL_1["name"],  # llama3.2:3b
+            model=MODEL_1["name"],
             messages=[
-                {"role": "system", "content": system_prompt},
+                {"role": "system", "content": formatting_prompt},
                 {
                     "role": "user",
                     "content": f"Raw Schedule Text:\n{raw_schedule_text}",
@@ -318,7 +260,6 @@ Duration: X Day(s)
 
 
 def extract_text_from_page_images(page) -> str:
-    """Extracts text from all embedded images inside a PDF page using PyMuPDF and Tesseract OCR."""
     ocr_text = []
     image_list = page.get_images(full=True)
 
@@ -344,7 +285,6 @@ def extract_text_from_page_images(page) -> str:
 
 
 def extract_pdf_data(pdf_path: Path) -> tuple[str, str, str, str, float]:
-    """Extracts PDF text, classifies pdf_type ('txt' vs 'img'), cleans noise, and parses components."""
     start_time = time.time()
     doc = fitz.open(pdf_path)
     full_text = []
@@ -352,29 +292,18 @@ def extract_pdf_data(pdf_path: Path) -> tuple[str, str, str, str, float]:
     total_pages = len(doc)
 
     schedule_keywords = [
-        "module",
-        "schedule",
-        "outline",
-        "day 1",
-        "agenda",
-        "session",
-        "topic",
-        "morning",
-        "afternoon",
+        "module", "schedule", "outline", "day 1",
+        "agenda", "session", "topic", "morning", "afternoon"
     ]
 
     for page in doc:
-        # FIX: Extract text blocks sorted top-to-bottom to preserve reading order
         text = extract_page_text_ordered(page)
 
-        # Scenario A: Scanned Page (Pure Image PDF)
         if len(text) <= 50:
             ocr_page_count += 1
             pix = page.get_pixmap(dpi=300)
             img = Image.open(io.BytesIO(pix.tobytes("png")))
             full_text.append(pytesseract.image_to_string(img))
-
-        # Scenario B: Hybrid Page (Text present, but schedule or sections might be embedded images)
         else:
             has_schedule_kw = any(
                 kw in text.lower() for kw in schedule_keywords
@@ -384,14 +313,11 @@ def extract_pdf_data(pdf_path: Path) -> tuple[str, str, str, str, float]:
             if not has_schedule_kw and len(image_list) > 0:
                 ocr_img_text = extract_text_from_page_images(page)
                 if ocr_img_text:
-                    text += (
-                        f"\n\n--- [IMAGE OCR CONTENT] ---\n{ocr_img_text}"
-                    )
+                    text += f"\n\n--- [IMAGE OCR CONTENT] ---\n{ocr_img_text}"
 
             full_text.append(text)
 
     pdf_type = "img" if (ocr_page_count / max(total_pages, 1)) > 0.5 else "txt"
-
     raw_combined = "\n\n".join(full_text)
     clean_combined = clean_pdf_noise(raw_combined)
 
@@ -409,21 +335,15 @@ def extract_pdf_data(pdf_path: Path) -> tuple[str, str, str, str, float]:
     )
 
 
-def calculate_semantic_similarity(
-    summary_text: str, reference_text: str
-) -> float:
-    """Calculates Semantic Cosine Similarity (0.0 to 1.0) between LLM summary and full syllabus text."""
-    if (
-        not summary_text
-        or summary_text.startswith("[Error")
-        or summary_text.startswith("[Quota")
-    ):
-        return None
+def calculate_semantic_similarity(summary, reference_text):
+    # Safe handling: Return 0.0 score for failed LLM runs
+    if not summary or summary == "Null":
+        return 0.0
 
-    emb1 = semantic_model.encode(summary_text, convert_to_tensor=True)
+    emb1 = semantic_model.encode(summary, convert_to_tensor=True)
     emb2 = semantic_model.encode(reference_text, convert_to_tensor=True)
-    cosine_score = util.cos_sim(emb1, emb2).item()
-    return round(float(cosine_score), 4)
+    score = util.cos_sim(emb1, emb2).item()
+    return round(score, 4)
 
 
 def match_pdf_to_catalog(pdf_name: str, catalog: list) -> dict:
@@ -440,124 +360,136 @@ def generate_llm_summary(
     model_key: str,
     course_title: str,
     full_cleaned_text: str,
-) -> tuple[str, float]:
-    """Generates LLM summary with automatic OpenRouter native failover and safe error handling."""
+    max_retries: int = 2,
+) -> tuple[str | None, float]:
+    """
+    Generates LLM summary with a retry loop for temporary errors and 
+    circuit-breaking (DISABLED_MODELS) for quota/rate limits.
+    """
+    # 1. Early exit if the model was flagged as quota-exceeded in a previous run
     if DISABLED_MODELS.get(model_key, False):
         return None, 0.0
 
     prompt = f"Course Title: {course_title}\n\nFull Course Document Content:\n{full_cleaned_text[:8000]}"
     start_time = time.time()
 
-    try:
-        # --- SCENARIO A: LOCAL OLLAMA ---
-        if model_config["type"] == "ollama":
-            response = ollama.chat(
-                model=model_config["name"],
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": prompt},
-                ],
-            )
-            # Safely extract message content
-            result = response.get("message", {}).get("content", "").strip()
-
-        # --- SCENARIO B: OPENROUTER WITH AUTOMATIC FALLBACK ARRAY ---
-        elif model_config["type"] == "openrouter_fallback":
-            response = openrouter_client.chat.completions.create(
-                model=model_config["primary"],
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": prompt},
-                ],
-                extra_body={
-                    "models": [
-                        model_config["primary"],
-                        model_config["backup"],
-                    ]
-                },
-            )
-            result = response.choices[0].message.content.strip()
-
-        # --- SCENARIO C: STANDARD SINGLE OPENROUTER CALL ---
-        elif model_config["type"] == "openrouter":
-            response = openrouter_client.chat.completions.create(
-                model=model_config["name"],
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": prompt},
-                ],
-            )
-            result = response.choices[0].message.content.strip()
-
-        latency = round(time.time() - start_time, 2)
-        return result, latency
-
-    except Exception as e:
-        err_msg = str(e).lower()
-
-        if any(
-            kw in err_msg
-            for kw in [
-                "insufficient_quota",
-                "rate_limit",
-                "429",
-                "credit",
-                "balance",
-            ]
-        ):
-            print(
-                f"   ⚠️ Rate limit/Quota hit on {model_key}. Disabling model for this run."
-            )
-            DISABLED_MODELS[model_key] = True
-            return None, round(time.time() - start_time, 2)
-
-        print(
-            f"   ⚠️ API Error on {model_key}: {e}. Falling back to local Ollama..."
-        )
+    for attempt in range(1, max_retries + 1):
         try:
-            fallback_resp = ollama.chat(
-                model=MODEL_1["name"],
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": prompt},
-                ],
+            if model_config["type"] == "ollama":
+                response = ollama.chat(
+                    model=model_config["name"],
+                    messages=[
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": prompt},
+                    ],
+                )
+                # Safe dict extraction
+                summary = response.get("message", {}).get("content", "").strip()
+
+            elif model_config["type"] == "openrouter":
+                response = openrouter_client.chat.completions.create(
+                    model=model_config["name"],
+                    messages=[
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": prompt},
+                    ],
+                )
+                # Safe choice extraction
+                if response and hasattr(response, "choices") and response.choices:
+                    summary = response.choices[0].message.content.strip()
+                else:
+                    raise ValueError("Empty payload returned from OpenRouter.")
+
+            latency = round(time.time() - start_time, 2)
+            return summary, latency
+
+        except Exception as e:
+            err_msg = str(e).lower()
+
+            # Check if error is unrecoverable (quota/credits) vs transient
+            is_quota_error = any(
+                kw in err_msg
+                for kw in [
+                    "insufficient_quota",
+                    "rate_limit",
+                    "429",
+                    "credit",
+                    "balance",
+                    "quota",
+                ]
             )
-            result = f"[Fallback-Local] {fallback_resp.get('message', {}).get('content', '').strip()}"
-            return result, round(time.time() - start_time, 2)
-        except Exception as local_err:
-            return (
-                f"[Error: {str(e)} | Fallback Error: {str(local_err)}]",
-                round(time.time() - start_time, 2),
+
+            if is_quota_error:
+                print(
+                    f"    ⚠️ Quota/Rate limit reached for {model_key} -> {type(e).__name__}: {e}. Skipping model for remaining runs."
+                )
+                DISABLED_MODELS[model_key] = True
+                break  # Stop retrying if the quota is exceeded
+
+            # Log attempt failure for transient errors
+            print(
+                f"    ⚠️ [{model_key}] Attempt {attempt}/{max_retries} Failed -> {type(e).__name__}: {e}"
             )
+
+            # Delay before retrying transient failures
+            if attempt < max_retries:
+                time.sleep(3)
+
+    # Return None if retries were exhausted or a quota error occurred
+    latency = round(time.time() - start_time, 2)
+    print(f"    ❌ [{model_key}] Execution failed. Defaulting to None.")
+    return None, latency
 
 def get_model_identifier(model_config: dict) -> str:
-    """Helper to get a clean string identifier for CSV column naming."""
-    if model_config["type"] == "openrouter_fallback":
-        raw_name = model_config["primary"]
-    else:
-        raw_name = model_config["name"]
-    return raw_name.replace(":", "_").replace("/", "_")
+    return model_config["name"].replace(":", "_").replace("/", "_")
 
 
 def main():
+    start_partition_time = time.time()
+
+    parser = argparse.ArgumentParser(
+        description="Process a single partition batch of course PDFs."
+    )
+    parser.add_argument(
+        "--partition",
+        type=int,
+        choices=[1, 2, 3, 4],
+        default=int(os.getenv("PARTITION", 1)),
+        help="Partition index to process (1, 2, 3, or 4)",
+    )
+    args = parser.parse_args()
+    partition_id = args.partition
+
     if not OPENROUTER_API_KEY:
         print("❌ Error: OPENROUTER_API_KEY missing in .env file.")
         return
 
+    # NEW LOGIC (Matches your folder structure directly)
+    target_folder = BASE_DIR / f"INDIGO courses_P{partition_id}"
+    if not target_folder.exists():
+        print(f"❌ Error: Directory not found -> {target_folder}")
+        return
+
+    pdf_files = list(target_folder.rglob("*.pdf"))
+
+    output_csv = Path(f"research_course_summaries_partition_{partition_id}.csv")
     catalog = load_catalog(CATALOG_PATH)
-    pdf_files = list(BASE_PDF_FOLDER.rglob("*.pdf"))
     rows = []
 
-    print(f"Starting research batch run on {len(pdf_files)} PDFs...\n")
+    # FIXED: Replaced len(subfolders) with total partition count (4)
+    print(
+        f"🚀 Running Partition {partition_id}/4: Target Folder -> '{target_folder.name}'"
+    )
+    print(f"Found {len(pdf_files)} PDFs to process. Output target: {output_csv}\n")
 
     for idx, pdf_file in enumerate(pdf_files, 1):
-        print(f"[{idx}/{len(pdf_files)}] Processing: {pdf_file.name}")
+        print(f"\n[{idx}/{len(pdf_files)}] Processing: {pdf_file.name}")
 
         category_folder = pdf_file.parent.name
         matched = match_pdf_to_catalog(pdf_file.name, catalog)
 
         if not matched:
-            print(f"  └─ ⚠️ Skipped (No catalog match)")
+            print("  └─ ⚠️ Skipped (No catalog match)")
             continue
 
         try:
@@ -569,13 +501,12 @@ def main():
                 ocr_time,
             ) = extract_pdf_data(pdf_file)
 
-            # MODEL GENERATIONS (Reading Full Cleaned Content)
             print("  └─ Running Model 1 (Ollama)...")
             sum1, time1 = generate_llm_summary(
                 MODEL_1, "MODEL_1", matched["title"], cleaned_text
             )
 
-            print("  └─ Running Model 2 (OpenRouter Free/Paid)...")
+            print("  └─ Running Model 2 (OpenRouter)...")
             sum2, time2 = generate_llm_summary(
                 MODEL_2, "MODEL_2", matched["title"], cleaned_text
             )
@@ -585,65 +516,62 @@ def main():
                 MODEL_3, "MODEL_3", matched["title"], cleaned_text
             )
 
-            # METRICS COMPUTATION
+            print("  └─ Calculating Semantic Similarity Scores...")
             rich_reference_text = (
                 f"{orig_overview}\n\nSyllabus Outline:\n{outline_summary}"
             )
 
-            print("  └─ Calculating Semantic Similarity Scores...")
             sem1 = calculate_semantic_similarity(sum1, rich_reference_text)
             sem2 = calculate_semantic_similarity(sum2, rich_reference_text)
             sem3 = calculate_semantic_similarity(sum3, rich_reference_text)
+
+            # --- LIVE TERMINAL OUTPUT ---
+            print(f"  └─ Latency (s)  -> M1: {time1}s | M2: {time2}s | M3: {time3}s")
+            print(f"  └─ Semantic     -> M1: {sem1} | M2: {sem2} | M3: {sem3}")
 
             m1_tag = get_model_identifier(MODEL_1)
             m2_tag = get_model_identifier(MODEL_2)
             m3_tag = get_model_identifier(MODEL_3)
 
-            rows.append({
-                # Document Metadata
-                "id": matched["course_id"],
-                "category": category_folder,
-                "title": matched["title"],
-                "pdf_type": pdf_type,
-                "original_overview": orig_overview,
-                "outline_summary": outline_summary,
-                "extraction_time_sec": ocr_time,
-                # Model Summaries
-                f"summary_{m1_tag}": sum1,
-                f"summary_{m2_tag}": sum2,
-                f"summary_{m3_tag}": sum3,
-                # Model Latency Metrics
-                f"latency_sec_{m1_tag}": time1,
-                f"latency_sec_{m2_tag}": time2,
-                f"latency_sec_{m3_tag}": time3,
-                # Model Semantic Similarity Scores
-                f"semantic_score_{m1_tag}": sem1,
-                f"semantic_score_{m2_tag}": sem2,
-                f"semantic_score_{m3_tag}": sem3,
-            })
+            rows.append(
+                {
+                    "id": matched["course_id"],
+                    "category": category_folder,
+                    "title": matched["title"],
+                    "pdf_type": pdf_type,
+                    "original_overview": orig_overview,
+                    "outline_summary": outline_summary,
+                    "extraction_time_sec": ocr_time,
+                    f"summary_{m1_tag}": sum1,
+                    f"summary_{m2_tag}": sum2,
+                    f"summary_{m3_tag}": sum3,
+                    f"latency_sec_{m1_tag}": time1,
+                    f"latency_sec_{m2_tag}": time2,
+                    f"latency_sec_{m3_tag}": time3,
+                    f"semantic_score_{m1_tag}": sem1,
+                    f"semantic_score_{m2_tag}": sem2,
+                    f"semantic_score_{m3_tag}": sem3,
+                }
+            )
 
         except Exception as e:
             print(f"  └─ ❌ Error on file {pdf_file.name}: {e}")
 
-    df = pd.DataFrame(rows)
+        # Pause 2 seconds between runs to prevent OpenRouter rate limiting
+        time.sleep(2)
 
-    try:
-        df.to_csv(OUTPUT_CSV_PATH, index=False, encoding="utf-8-sig")
-        print(
-            f"\nResearch test complete! Output saved to '{OUTPUT_CSV_PATH}'."
-        )
-    except PermissionError:
-        fallback_path = Path("research_course_summaries_latest.csv")
-        df.to_csv(fallback_path, index=False, encoding="utf-8-sig")
-        print(
-            f"\n⚠️ '{OUTPUT_CSV_PATH}' was locked. Output saved to '{fallback_path}'."
-        )
+    df = pd.DataFrame(rows)
+    df.to_csv(output_csv, index=False, encoding="utf-8-sig")
+    
+    # Calculate elapsed time
+    total_sec = round(time.time() - start_partition_time, 2)
+    mins = int(total_sec // 60)
+    secs = round(total_sec % 60, 1)
+    
+    print(f"\n Partition {partition_id} finished in {mins}m {secs}s! Saved to '{output_csv}'.")
 
 
 if __name__ == "__main__":
     main()
 
-# Plays the default Windows alert sound
-winsound.MessageBeep(winsound.MB_OK)
-winsound.MessageBeep(winsound.MB_OK)
 winsound.MessageBeep(winsound.MB_OK)
