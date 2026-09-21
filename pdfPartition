@@ -1,0 +1,39 @@
+BASE_PDF_FOLDER = Path(r"D:\Intern_Sem7\INDIGO courses_P1")
+Total PDF files found: 47
+
+Sample files:
+ - AI Awareness A Fun & Exciting Discovery Day.pdf
+ - AI Foundation & Custom GPT for Engineers Course Outline.pdf
+ - AI-Enhanced Root Cause Analysis for Manufacturing Excellence (2 Days) Course Outline.pdf
+ - Artificial Intelligence for Engineers Course Outline.pdf
+ - Artificial Intelligence for Finance Course Outline.pdf
+
+BASE_PDF_FOLDER = Path(r"D:\Intern_Sem7\INDIGO courses_P2")
+Total PDF files found: 42
+
+Sample files:
+ - Big Data Strategy.pdf
+ - Data Science (Intermediate to Advanced).pdf
+ - IR 4.0 Machine Connectivity.pdf
+ - ISO 14001 EMS Aspect Impact.pdf
+ - ISO 140012015 Awareness Training Microsoft Excel Intermediate– 2D.pdf
+
+BASE_PDF_FOLDER = Path(r"D:\Intern_Sem7\INDIGO courses_P3")
+Total PDF files found: 49
+
+Sample files:
+ - Sales Excellence Training Program Course Outline.pdf
+ - Sales Influencing and Self Motivation Program Course Outline.pdf
+ - Super Sale Program - Influencing & Persuasion Skills Course Outline.pdf
+ - The Winning Attitude For Employees Course Outline.pdf
+ - Introduction to SAP Business.pdf
+
+BASE_PDF_FOLDER = Path(r"D:\Intern_Sem7\INDIGO courses_P4")
+Total PDF files found: 30
+
+Sample files:
+ - Be an Ideal Player of Your Team – Powered by LEGO SERIOUS PLAY Method.pdf
+ - Business Writing for Today Workplace.pdf
+ - Conference Negotiation Intelligence.pdf
+ - Conference The EQ Edge Driving Engagement & High Performance.pdf
+ - Constructive Conversation Giving & Receiving Feedback Course Outline.pdf

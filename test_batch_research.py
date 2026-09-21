@@ -42,13 +42,12 @@ pytesseract.pytesseract.tesseract_cmd = (
 # ==========================================
 MODEL_1 = {
     "type": "ollama",
-    "name": "llama3.2:3b",  # Super fast local model (~2-4 seconds per doc)
+    "name": "llama3.2:3b",  # Super fast local model (~2-4 seconds per doc), faster than qwen2.5
 }
 
 MODEL_2 = {
     "type": "openrouter_fallback",
-    "primary": "google/gemma-3-27b-it:free",  # Primary free model
-    "backup": "deepseek/deepseek-chat",  # Micro-cost paid fallback (~$0.0002)
+    "name": "google/gemma-3-27b-it:free",  # Primary free model
 }
 
 MODEL_3 = {
@@ -302,7 +301,7 @@ Duration: X Day(s)
 
     try:
         response = ollama.chat(
-            model=MODEL_1["name"],  # qwen2.5:7b
+            model=MODEL_1["name"],  # llama3.2:3b
             messages=[
                 {"role": "system", "content": system_prompt},
                 {
@@ -442,7 +441,7 @@ def generate_llm_summary(
     course_title: str,
     full_cleaned_text: str,
 ) -> tuple[str, float]:
-    """Generates LLM summary with automatic OpenRouter native failover and local Python retries."""
+    """Generates LLM summary with automatic OpenRouter native failover and safe error handling."""
     if DISABLED_MODELS.get(model_key, False):
         return None, 0.0
 
@@ -459,11 +458,11 @@ def generate_llm_summary(
                     {"role": "user", "content": prompt},
                 ],
             )
-            result = response["message"]["content"].strip()
+            # Safely extract message content
+            result = response.get("message", {}).get("content", "").strip()
 
         # --- SCENARIO B: OPENROUTER WITH AUTOMATIC FALLBACK ARRAY ---
         elif model_config["type"] == "openrouter_fallback":
-            # Passing an array in 'extra_body' instructs OpenRouter to failover seamlessly on 429/5xx errors
             response = openrouter_client.chat.completions.create(
                 model=model_config["primary"],
                 messages=[
@@ -496,7 +495,6 @@ def generate_llm_summary(
     except Exception as e:
         err_msg = str(e).lower()
 
-        # Catch quota/rate limit errors if OpenRouter failover exhausted
         if any(
             kw in err_msg
             for kw in [
@@ -513,9 +511,8 @@ def generate_llm_summary(
             DISABLED_MODELS[model_key] = True
             return None, round(time.time() - start_time, 2)
 
-        # Catch general API errors and attempt emergency fallback to local Ollama
         print(
-            f"   ⚠️ OpenRouter API failed ({e}). Falling back to local Ollama ({MODEL_1['name']})..."
+            f"   ⚠️ API Error on {model_key}: {e}. Falling back to local Ollama..."
         )
         try:
             fallback_resp = ollama.chat(
@@ -525,13 +522,21 @@ def generate_llm_summary(
                     {"role": "user", "content": prompt},
                 ],
             )
-            result = f"[Fallback-Local] {fallback_resp['message']['content'].strip()}"
+            result = f"[Fallback-Local] {fallback_resp.get('message', {}).get('content', '').strip()}"
             return result, round(time.time() - start_time, 2)
         except Exception as local_err:
             return (
-                f"[Error: {str(e)} | Local Fallback Error: {str(local_err)}]",
+                f"[Error: {str(e)} | Fallback Error: {str(local_err)}]",
                 round(time.time() - start_time, 2),
             )
+
+def get_model_identifier(model_config: dict) -> str:
+    """Helper to get a clean string identifier for CSV column naming."""
+    if model_config["type"] == "openrouter_fallback":
+        raw_name = model_config["primary"]
+    else:
+        raw_name = model_config["name"]
+    return raw_name.replace(":", "_").replace("/", "_")
 
 
 def main():
@@ -570,12 +575,12 @@ def main():
                 MODEL_1, "MODEL_1", matched["title"], cleaned_text
             )
 
-            print("  └─ Running Model 2 (Ollama)...")
+            print("  └─ Running Model 2 (OpenRouter Free/Paid)...")
             sum2, time2 = generate_llm_summary(
                 MODEL_2, "MODEL_2", matched["title"], cleaned_text
             )
 
-            print("  └─ Running Model 3 (OpenRouter Free)...")
+            print("  └─ Running Model 3 (OpenRouter Paid)...")
             sum3, time3 = generate_llm_summary(
                 MODEL_3, "MODEL_3", matched["title"], cleaned_text
             )
@@ -590,6 +595,10 @@ def main():
             sem2 = calculate_semantic_similarity(sum2, rich_reference_text)
             sem3 = calculate_semantic_similarity(sum3, rich_reference_text)
 
+            m1_tag = get_model_identifier(MODEL_1)
+            m2_tag = get_model_identifier(MODEL_2)
+            m3_tag = get_model_identifier(MODEL_3)
+
             rows.append({
                 # Document Metadata
                 "id": matched["course_id"],
@@ -600,17 +609,17 @@ def main():
                 "outline_summary": outline_summary,
                 "extraction_time_sec": ocr_time,
                 # Model Summaries
-                f"summary_{MODEL_1['name'].replace(':', '_').replace('/', '_')}": sum1,
-                f"summary_{MODEL_2['name'].replace(':', '_').replace('/', '_')}": sum2,
-                f"summary_{MODEL_3['name'].replace(':', '_').replace('/', '_')}": sum3,
+                f"summary_{m1_tag}": sum1,
+                f"summary_{m2_tag}": sum2,
+                f"summary_{m3_tag}": sum3,
                 # Model Latency Metrics
-                f"latency_sec_{MODEL_1['name'].replace(':', '_').replace('/', '_')}": time1,
-                f"latency_sec_{MODEL_2['name'].replace(':', '_').replace('/', '_')}": time2,
-                f"latency_sec_{MODEL_3['name'].replace(':', '_').replace('/', '_')}": time3,
+                f"latency_sec_{m1_tag}": time1,
+                f"latency_sec_{m2_tag}": time2,
+                f"latency_sec_{m3_tag}": time3,
                 # Model Semantic Similarity Scores
-                f"semantic_score_{MODEL_1['name'].replace(':', '_').replace('/', '_')}": sem1,
-                f"semantic_score_{MODEL_2['name'].replace(':', '_').replace('/', '_')}": sem2,
-                f"semantic_score_{MODEL_3['name'].replace(':', '_').replace('/', '_')}": sem3,
+                f"semantic_score_{m1_tag}": sem1,
+                f"semantic_score_{m2_tag}": sem2,
+                f"semantic_score_{m3_tag}": sem3,
             })
 
         except Exception as e:
