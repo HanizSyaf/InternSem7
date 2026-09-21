@@ -361,7 +361,7 @@ def generate_llm_summary(
     model_key: str,
     course_title: str,
     full_cleaned_text: str,
-    max_retries: int = 4, # Primary model attempts
+    max_retries: int = 6, # Primary model attempts
 ) -> tuple[str | None, float]:
     """
     Generates LLM summary with a 4-retry loop for the primary model,
