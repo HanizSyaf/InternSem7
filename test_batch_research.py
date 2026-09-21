@@ -16,7 +16,8 @@ import pytesseract
 from rapidfuzz import fuzz, process
 from sentence_transformers import SentenceTransformer, util
 import winsound
-#v13-partition pdf, 4 part
+#v13.1 -partition pdf, 4 part
+# add model fallback for MODEL_2
 
 # Load lightweight local embedding model for Semantic Similarity
 semantic_model = SentenceTransformer("all-MiniLM-L6-v2")
@@ -360,11 +361,11 @@ def generate_llm_summary(
     model_key: str,
     course_title: str,
     full_cleaned_text: str,
-    max_retries: int = 2,
+    max_retries: int = 4, # Primary model attempts
 ) -> tuple[str | None, float]:
     """
-    Generates LLM summary with a retry loop for temporary errors and 
-    circuit-breaking (DISABLED_MODELS) for quota/rate limits.
+    Generates LLM summary with a 4-retry loop for the primary model,
+    followed by a secondary fallback attempt if primary retries are exhausted.
     """
     # 1. Early exit if the model was flagged as quota-exceeded in a previous run
     if DISABLED_MODELS.get(model_key, False):
@@ -373,6 +374,7 @@ def generate_llm_summary(
     prompt = f"Course Title: {course_title}\n\nFull Course Document Content:\n{full_cleaned_text[:8000]}"
     start_time = time.time()
 
+    # --- STAGE 1: Try Primary Model (up to max_retries times) ---
     for attempt in range(1, max_retries + 1):
         try:
             if model_config["type"] == "ollama":
@@ -383,7 +385,6 @@ def generate_llm_summary(
                         {"role": "user", "content": prompt},
                     ],
                 )
-                # Safe dict extraction
                 summary = response.get("message", {}).get("content", "").strip()
 
             elif model_config["type"] == "openrouter":
@@ -394,7 +395,6 @@ def generate_llm_summary(
                         {"role": "user", "content": prompt},
                     ],
                 )
-                # Safe choice extraction
                 if response and hasattr(response, "choices") and response.choices:
                     summary = response.choices[0].message.content.strip()
                 else:
@@ -406,38 +406,50 @@ def generate_llm_summary(
         except Exception as e:
             err_msg = str(e).lower()
 
-            # Check if error is unrecoverable (quota/credits) vs transient
-            is_quota_error = any(
-                kw in err_msg
-                for kw in [
-                    "insufficient_quota",
-                    "rate_limit",
-                    "429",
-                    "credit",
-                    "balance",
-                    "quota",
-                ]
-            )
+            # Permanent account/credit blocks -> Stop using model permanently
+            is_perm_quota = any(kw in err_msg for kw in ["insufficient_quota", "credit", "balance", "402"])
+            
+            # Temporary rate limits -> Wait longer and retry
+            is_rate_limit = any(kw in err_msg for kw in ["rate_limit", "429", "too many requests"])
 
-            if is_quota_error:
-                print(
-                    f"    ⚠️ Quota/Rate limit reached for {model_key} -> {type(e).__name__}: {e}. Skipping model for remaining runs."
-                )
+            if is_perm_quota:
+                print(f" ⚠️ Quota/Credit exhausted for {model_key}. Disabling for remaining run.")
                 DISABLED_MODELS[model_key] = True
-                break  # Stop retrying if the quota is exceeded
+                break
 
-            # Log attempt failure for transient errors
-            print(
-                f"    ⚠️ [{model_key}] Attempt {attempt}/{max_retries} Failed -> {type(e).__name__}: {e}"
-            )
+            if is_rate_limit:
+                print(f" ⚠️ [{model_key}] Hit rate limit (429). Retrying in 10s (Attempt {attempt}/{max_retries})...")
+                time.sleep(10)
+                continue
 
-            # Delay before retrying transient failures
+            print(f" ⚠️ [{model_key}] Attempt {attempt}/{max_retries} Failed -> {type(e).__name__}: {e}")
             if attempt < max_retries:
                 time.sleep(3)
 
-    # Return None if retries were exhausted or a quota error occurred
+    # --- STAGE 2: Fallback (Only reached if all primary retries failed and model type is openrouter) ---
+    if model_config["type"] == "openrouter" and not DISABLED_MODELS.get(model_key, False):
+        fallback_model = "openrouter/free"
+        print(f" 🔄 [{model_key}] All {max_retries} primary attempts failed. Attempting Fallback -> {fallback_model}...")
+        
+        try:
+            fallback_response = openrouter_client.chat.completions.create(
+                model=fallback_model,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
+            )
+            if fallback_response and hasattr(fallback_response, "choices") and fallback_response.choices:
+                summary = fallback_response.choices[0].message.content.strip()
+                latency = round(time.time() - start_time, 2)
+                print(f" └─ ✅ Fallback succeeded with {fallback_model}")
+                return summary, latency
+        except Exception as fb_err:
+            print(f" ⚠️ [{model_key}] Fallback attempt also failed -> {fb_err}")
+
+    # Final Failure
     latency = round(time.time() - start_time, 2)
-    print(f"    ❌ [{model_key}] Execution failed. Defaulting to None.")
+    print(f" ❌ [{model_key}] Execution failed. Defaulting to None.")
     return None, latency
 
 def get_model_identifier(model_config: dict) -> str:
@@ -557,8 +569,8 @@ def main():
         except Exception as e:
             print(f"  └─ ❌ Error on file {pdf_file.name}: {e}")
 
-        # Pause 2 seconds between runs to prevent OpenRouter rate limiting
-        time.sleep(2)
+        # Pause 6 seconds between runs to prevent OpenRouter rate limiting
+        time.sleep(6)
 
     df = pd.DataFrame(rows)
     df.to_csv(output_csv, index=False, encoding="utf-8-sig")
