@@ -142,6 +142,4 @@ webencodings==0.6.1
 websocket-client==1.9.2
 widgetsnbextension==4.0.16
 
-##OPENROUTER_API_KEY=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 #hsk
-#OPENROUTER_API_KEY=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
 #OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
