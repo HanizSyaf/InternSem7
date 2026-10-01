@@ -14,6 +14,7 @@ from PIL import Image
 import pytesseract
 from rapidfuzz import fuzz, process
 import winsound
+import hashlib
 
 # ----------------------------------------------------------------------
 # 1️⃣ Configuration & Environment Setup
@@ -89,6 +90,37 @@ RULES:
 4. STRICT FORMAT: Return ONLY the title string. Do NOT use quotation marks, markdown wrappers, or conversational prefixes (e.g., DO NOT say "Here is the title:").
 """
 
+# ==========================================
+# 1. HELPER FUNCTIONS
+# ==========================================
+
+
+def get_file_hash(file_path: Path) -> str:
+    """Computes MD5 hash to detect duplicate files regardless of filename."""
+    hasher = hashlib.md5()
+    with open(file_path, "rb") as f:
+        hasher.update(f.read(65536))
+    return hasher.hexdigest()
+
+def get_unique_pdf_map(pdf_dir: Path) -> dict[str, Path]:
+    """Scans PDF_DIR, removes content duplicates via hashing,
+
+    and returns a lookup dictionary of {filename: Path}.
+    """
+    seen_hashes = set()
+    unique_pdfs = {}
+
+    print("🔍 Indexing and deduplicating PDF directory...")
+    for pdf_path in pdf_dir.rglob("*.pdf"):
+        file_hash = get_file_hash(pdf_path)
+        if file_hash not in seen_hashes:
+            seen_hashes.add(file_hash)
+            unique_pdfs[pdf_path.name.lower()] = pdf_path
+
+    print(
+        f"✅ Found {len(unique_pdfs)} unique PDF files (filtered out duplicates).\n"
+    )
+    return unique_pdfs
 
 def load_catalog(path: Path) -> list:
     with open(path, "r", encoding="utf-8") as f:
@@ -99,6 +131,12 @@ def global_noise_cleaner(text: str) -> str:
     # Remove brand header/footer noise
     text = re.sub(r"(?i)\bby\s+elite\s+indigo\b", "", text)
     text = re.sub(r"(?i)\belite\s+indigo\s+(sdn\s+bhd|pte\s+ltd)?\b", "", text)
+    text = re.sub(
+        r"https?://\S+|www\.\S+|\b\S*eliteindigo\S*\b",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
     
     # URL / Email / HRDF Noise
     text = re.sub(r"https?://\S+|www\.\S+|\b\S*eliteindigo\S*\b", "", text, flags=re.IGNORECASE)
@@ -114,25 +152,25 @@ def global_noise_cleaner(text: str) -> str:
 
 
 def extract_raw_pdf_text(pdf_path: Path) -> str:
+    """Extracts native text and uses Tesseract OCR as a fallback per page."""
     doc = fitz.open(pdf_path)
     full_text = []
 
-    for page_num, page in enumerate(doc, 1):
+    for page in doc:
         page_text = page.get_text("text").strip()
-        
-        # If page has minimal native text, run OCR to capture diagram/scanned text
+
+        # If page text is short/missing, try OCR fallback
         if len(page_text) < 300:
             try:
                 pix = page.get_pixmap(dpi=300)
                 img = Image.open(io.BytesIO(pix.tobytes("png")))
                 ocr_text = pytesseract.image_to_string(img).strip()
-                
-                # Append OCR text if it captured more content than native PyMuPDF
+
                 if len(ocr_text) > len(page_text):
                     page_text = f"{page_text}\n{ocr_text}"
-            except Exception as e:
-                pass  # Fall back to native page_text if OCR fails
-                
+            except Exception:
+                pass  # Fallback to native page_text if OCR fails
+
         if page_text:
             full_text.append(page_text)
 
@@ -216,9 +254,33 @@ def generate_title_llm(
 # ----------------------------------------------------------------------
 def main():
     print("🚀 Starting Batch Title Generation Pipeline...")
+
+    # Load catalog and catalog lookup map
     catalog = load_catalog(CATALOG_PATH)
-    catalog_dict = {item["course_id"]: item for item in catalog if "course_id" in item}
-    pdf_files = list(PDF_DIR.rglob("*.pdf"))
+    catalog_dict = {
+        str(item["course_id"]): item
+        for item in catalog
+        if "course_id" in item
+    }
+
+    # --- 1. PRE-DEDUPLICATE PDF FILES BY HASH ---
+    unique_pdf_map = get_unique_pdf_map(PDF_DIR)
+    unique_pdf_paths = list(unique_pdf_map.values())
+
+    # --- 2. LOAD EXISTING OUTPUT CSV TO SKIP COMPLETED IDS ---
+    processed_ids = set()
+    if OUTPUT_CSV.exists():
+        try:
+            existing_df = pd.read_csv(OUTPUT_CSV)
+            if "id" in existing_df.columns:
+                processed_ids = set(existing_df["id"].astype(str).tolist())
+                print(
+                    f"📋 Found {len(processed_ids)} previously processed items in '{OUTPUT_CSV.name}'.\n"
+                )
+        except Exception as e:
+            print(
+                f"⚠️ Could not read existing CSV ({e}). Starting with clean state."
+            )
 
     all_target_ids = list(catalog_dict.keys())
     start_idx = (BATCH_NUM - 1) * BATCH_SIZE
@@ -226,23 +288,53 @@ def main():
     target_ids = all_target_ids[start_idx:end_idx]
 
     print(f"📋 Loaded {len(all_target_ids)} total catalog items.")
-    print(f"⚙️ Running Batch {BATCH_NUM}: Items {start_idx} to {end_idx - 1}")
+    print(f"⚙️️ Running Batch {BATCH_NUM}: Items {start_idx} to {end_idx - 1}")
 
     rows = []
 
     for idx, target_id in enumerate(target_ids, 1):
+        # --- STEP A: SKIPPED FILE CHECK ---
+        if target_id in processed_ids:
+            print(
+                f"⏩ [{idx}/{len(target_ids)}] Skipping ID: {target_id} (Already processed in {OUTPUT_CSV.name})"
+            )
+            continue
+
         matched_item = catalog_dict[target_id]
         original_title = matched_item.get("title", "")
 
-        matched_pdf = find_matching_pdf(target_id, original_title, pdf_files)
+        # --- STEP B: MATCH CATALOG ITEM TO UNIQUE PDF ---
+        matched_pdf = find_matching_pdf(
+            target_id, original_title, unique_pdf_paths
+        )
         if not matched_pdf:
-            print(f"⚠️ [{idx}/{len(target_ids)}] PDF not found for ID: {target_id}")
+            print(
+                f"⚠️ [{idx}/{len(target_ids)}] PDF not found for ID: {target_id}"
+            )
             continue
 
-        print(f"\n[{idx}/{len(target_ids)}] ID: {target_id} | Original Title: {original_title}")
-
+        # --- STEP C: EXTRACT & CLEAN TEXT ---
         raw_text = extract_raw_pdf_text(matched_pdf)
         cleaned_text = global_noise_cleaner(raw_text)
+
+        # --- STEP D: MISMATCH GUARD ---
+        # Verify catalog title matches content inside the first 1200 chars of extracted text
+        match_score = fuzz.partial_ratio(
+            original_title.lower(), cleaned_text[:1200].lower()
+        )
+        if match_score < 45:
+            print(
+                f"\n⚠️ [{idx}/{len(target_ids)}] MISMATCH GUARD TRIGGERED for ID: {target_id}"
+            )
+            print(
+                f"   Catalog Title: '{original_title}' vs PDF File: '{matched_pdf.name}' (Score: {match_score:.1f})"
+            )
+            print("   ⏩ Skipping generation to prevent invalid output.\n")
+            continue
+
+        print(
+            f"\n[{idx}/{len(target_ids)}] ID: {target_id} | Original Title: {original_title}"
+        )
 
         row_data = {
             "id": target_id,
@@ -251,6 +343,7 @@ def main():
             "extracted_content_sample": cleaned_text[:1000],
         }
 
+        # --- STEP E: LLM TITLE GENERATION ---
         for m in MODELS:
             col_name = f"title_{m['label']}"
             latency_col = f"latency_sec_{m['label']}"
@@ -262,9 +355,22 @@ def main():
             row_data[latency_col] = latency
 
         rows.append(row_data)
+        processed_ids.add(target_id)
 
-    df = pd.DataFrame(rows)
-    df.to_csv(OUTPUT_CSV, index=False, encoding="utf-8-sig")
+    # Append or write to output CSV
+    if rows:
+        df_new = pd.DataFrame(rows)
+        if OUTPUT_CSV.exists():
+            df_new.to_csv(
+                OUTPUT_CSV,
+                mode="a",
+                header=False,
+                index=False,
+                encoding="utf-8-sig",
+            )
+        else:
+            df_new.to_csv(OUTPUT_CSV, index=False, encoding="utf-8-sig")
+
     print(f"\n✅ Batch {BATCH_NUM} Complete! Saved to '{OUTPUT_CSV}'.")
 
 
