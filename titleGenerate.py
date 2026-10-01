@@ -46,36 +46,34 @@ openrouter_client = OpenAI(
 # 2️⃣ Model Definitions (4 Selected Models)
 # ----------------------------------------------------------------------
 MODELS = [
+    # 1️⃣ Ollama - Moderate
     {
         "id": "model_1",
         "label": "llama3_2_3b",
         "type": "ollama",
         "name": "llama3.2:3b",
     },
+    # 2️⃣ Ollama - Advanced
     {
         "id": "model_2",
-        "label": "qwen3.5_9b",
+        "label": "qwen3_5_latest",
         "type": "ollama",
-        "name": "qwen3.5:9b",
+        "name": "qwen3.5:latest",
     },
+    # 3️⃣ OpenRouter - Moderate (Free)
     {
         "id": "model_3",
-        "label": "gemma4_latest",
-        "type": "ollama",
-        "name": "gemma4:latest", 
-    },
-    {
-        "id": "model_4",
         "label": "nemotron_120b_free",
         "type": "openrouter",
         "name": "nvidia/nemotron-3-super-120b-a12b:free",
     },
-"""     {
+    # 4️⃣ OpenRouter - Advanced (Paid Benchmark)
+    {
         "id": "model_4",
-        "label": "llama_70b_free",
+        "label": "gpt_4o_mini_paid",
         "type": "openrouter",
-        "name": "meta-llama/llama-3.3-70b-instruct:free",
-    }, """
+        "name": "openai/gpt-4o-mini",
+    },
 ]
 
 # ----------------------------------------------------------------------
@@ -176,6 +174,7 @@ def clean_title_output(raw_title: str) -> str:
 def generate_title_llm(
     model_config: dict, cleaned_text: str, max_retries: int = 5
 ) -> tuple[str, float]:
+    # Truncate context to 1500 chars for fast prompt processing
     prompt = f"Extract and generate a suitable course title based on the following text:\n\n{cleaned_text[:5000]}"
     start_time = time.time()
 
@@ -209,6 +208,7 @@ def generate_title_llm(
         except Exception as e:
             sleep_time = 2**attempt
             if attempt < max_retries:
+                print(f"     ⚠️ [{model_config['label']} Retry {attempt}] {e}. Retrying in {sleep_time}s...")
                 time.sleep(sleep_time)
                 continue
 
