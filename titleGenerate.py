@@ -96,32 +96,19 @@ def load_catalog(path: Path) -> list:
 
 
 def global_noise_cleaner(text: str) -> str:
-    text = re.sub(
-        r"https?://\S+|www\.\S+|\b\S*eliteindigo\S*\b",
-        "",
-        text,
-        flags=re.IGNORECASE,
-    )
-    text = re.sub(
-        r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b", "", text
-    )
-    text = re.sub(
-        r"(?i)100%\s+hrdf\s+claimable|hrdcorp\s+claimable|registered\s+hrdcorp\s+training\s+provider",
-        "",
-        text,
-    )
-    text = re.sub(
-        r"\b\d{1,2}[:.]\d{2}\s*(?:am|pm)?\s*[\u2013\u2014\-]\s*\d{1,2}[:.]\d{2}\s*(?:am|pm)?\b",
-        "",
-        text,
-        flags=re.IGNORECASE,
-    )
-    text = re.sub(
-        r"\(\s*\d+\s*(?:hour\vert{}hours\vert{}hr\vert{}hrs\vert{}minute\vert{}minutes\vert{}min\vert{}mins)\s*\)",
-        "",
-        text,
-        flags=re.IGNORECASE,
-    )
+    # Remove brand header/footer noise
+    text = re.sub(r"(?i)\bby\s+elite\s+indigo\b", "", text)
+    text = re.sub(r"(?i)\belite\s+indigo\s+(sdn\s+bhd|pte\s+ltd)?\b", "", text)
+    
+    # URL / Email / HRDF Noise
+    text = re.sub(r"https?://\S+|www\.\S+|\b\S*eliteindigo\S*\b", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b", "", text)
+    text = re.sub(r"(?i)100%\s+hrdf\s+claimable|hrdcorp\s+claimable|registered\s+hrdcorp\s+training\s+provider", "", text)
+    
+    # Time / Schedule noise
+    text = re.sub(r"\b\d{1,2}[:.]\d{2}\s*(?:am|pm)?\s*[\u2013\u2014\-]\s*\d{1,2}[:.]\d{2}\s*(?:am|pm)?\b", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\(\s*\d+\s*(?:hour|hours|hr|hrs|minute|minutes|min|mins)\s*\)", "", text, flags=re.IGNORECASE)
+    
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     return "\n".join(lines)
 
@@ -130,15 +117,24 @@ def extract_raw_pdf_text(pdf_path: Path) -> str:
     doc = fitz.open(pdf_path)
     full_text = []
 
-    for page in doc:
-        text = page.get_text("text").strip()
-        if len(text) >= 50:
-            full_text.append(text)
-        else:
-            pix = page.get_pixmap(dpi=300)
-            img = Image.open(io.BytesIO(pix.tobytes("png")))
-            ocr_text = pytesseract.image_to_string(img)
-            full_text.append(ocr_text)
+    for page_num, page in enumerate(doc, 1):
+        page_text = page.get_text("text").strip()
+        
+        # If page has minimal native text, run OCR to capture diagram/scanned text
+        if len(page_text) < 300:
+            try:
+                pix = page.get_pixmap(dpi=300)
+                img = Image.open(io.BytesIO(pix.tobytes("png")))
+                ocr_text = pytesseract.image_to_string(img).strip()
+                
+                # Append OCR text if it captured more content than native PyMuPDF
+                if len(ocr_text) > len(page_text):
+                    page_text = f"{page_text}\n{ocr_text}"
+            except Exception as e:
+                pass  # Fall back to native page_text if OCR fails
+                
+        if page_text:
+            full_text.append(page_text)
 
     return "\n\n".join(full_text)
 
@@ -174,8 +170,8 @@ def clean_title_output(raw_title: str) -> str:
 def generate_title_llm(
     model_config: dict, cleaned_text: str, max_retries: int = 5
 ) -> tuple[str, float]:
-    # Truncate context to 1500 chars for fast prompt processing
-    prompt = f"Extract and generate a suitable course title based on the following text:\n\n{cleaned_text[:5000]}"
+    # Send the COMPLETE cleaned text of the entire document
+    prompt = f"Extract and generate a suitable course title based on the following complete course text:\n\n{cleaned_text}"
     start_time = time.time()
 
     for attempt in range(1, max_retries + 1):
@@ -208,7 +204,6 @@ def generate_title_llm(
         except Exception as e:
             sleep_time = 2**attempt
             if attempt < max_retries:
-                print(f"     ⚠️ [{model_config['label']} Retry {attempt}] {e}. Retrying in {sleep_time}s...")
                 time.sleep(sleep_time)
                 continue
 
