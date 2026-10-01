@@ -84,7 +84,7 @@ Your task is to analyze course document text and generate a compelling, professi
 
 RULES:
 1. CAPITALIZATION: Output MUST be in Title Case (e.g., "Advanced Strategic Management for Corporate Leaders").
-2. LENGTH: Keep the title concise, between 4 and 10 words.
+2. LENGTH: Keep the title between 4 and 15 words. something that can help hermes agent decide suitable course recommendation by reading title alone.
 3. CONTENT FOCUS: Base the title purely on core skills, learning outcomes, and technical domains in the text. Ignore noise like dates, break times, venues, or HRDF details.
 4. STRICT FORMAT: Return ONLY the title string. Do NOT use quotation marks, markdown wrappers, or conversational prefixes (e.g., DO NOT say "Here is the title:").
 """
