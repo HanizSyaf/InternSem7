@@ -1,4 +1,4 @@
-#V1.4 use unproblematic folder 215 min, v1.5 fix capitalization, CSV Progress Loss Risk v1.6 Local X Cloud llm parallel
+#V1.4 use unproblematic folder 215 min, v1.5 fix capitalization, CSV Progress Loss Risk v1.6 Local X Cloud llm parallel, more noise elimination
 import io
 import json
 import os
@@ -28,8 +28,8 @@ pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tessera
 PDF_DIR = Path(r"D:\InternSem7-test\restart\INDIGO courses")
 CATALOG_PATH = Path(r"D:\InternSem7-test\catalog_cards.json")
 
-BATCH_NUM = 1
-BATCH_SIZE = 168
+BATCH_NUM = 3
+BATCH_SIZE = 54 #30(34min) +15 (17min) +54+69=168 good for not crash
 
 OUTPUT_CSV = Path(f"course_titles_batch_{BATCH_NUM}.csv")
 
@@ -107,21 +107,63 @@ def extract_raw_pdf_text(pdf_path: Path) -> str:
 
 
 def global_noise_cleaner(text: str) -> str:
-    """Strips common marketing headers, URLs, contact info, and standard footer boilerplate."""
+    """Strips common marketing headers, schedule noise, contact info, 
+    and cuts off trailing boilerplate pages.
+    """
+    # ------------------------------------------------------------------
+    # 1. CUT OFF END-OF-DOCUMENT MARKETING / FOOTER PAGES
+    # Cut off text starting from 'WHY CHOOSE US' or 'ABOUT ELITE INDIGO'
+    # ------------------------------------------------------------------
+    text = re.split(r"(?i)\b(?:WHY\s+CHOOSE\s+US|ABOUT\s+ELITE\s+INDIGO)\b", text)[0]
+
+    # ------------------------------------------------------------------
+    # 2. STRIP CONTACT INFO, URLS & BRANDING
+    # ------------------------------------------------------------------
     text = re.sub(r"(?i)\bby\s+elite\s+indigo\b", "", text)
     text = re.sub(r"(?i)\belite\s+indigo\s+(sdn\s+bhd|pte\s+ltd)?\b", "", text)
     text = re.sub(r"https?://\S+|www\.\S+|\b\S*eliteindigo\S*\b", "", text, flags=re.IGNORECASE)
-
     text = re.sub(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b", "", text)
     text = re.sub(r"\+?\d{1,4}[-.\s]?\(?\d{1,3}\)?[-.\s]?\d{3,4}[-.\s]?\d{3,4}", "", text)
     text = re.sub(r"(?i)100%\s+hrdf\s+claimable|hrdcorp\s+claimable|registered\s+hrdcorp\s+training\s+provider", "", text)
 
+    # ------------------------------------------------------------------
+    # 3. STRIP SCHEDULE & TIME NOISE
+    # Removes 'Lunch', '30 Minutes', '1 Hour', '2 Hours', 'Course Schedule', etc.
+    # ------------------------------------------------------------------
+    # Standalone Schedule Headers & Timings
+    text = re.sub(r"(?i)\b(?:course\s+schedule|day/time|recap\s*&\s*summary\s*of\s*day\s*\d+)\b", "", text)
+    text = re.sub(r"(?i)\b\d+\s*(?:full-day|full\s*day)\s*workshop\b", "", text)
+    text = re.sub(r"(?i)^\s*(?:lunch|opening\s*&\s*introduction|registration\s*&\s*ice-breaking)\s*$", "", text, flags=re.MULTILINE)
+    
+    # Standalone duration lines e.g. "1 Hour", "30 Minutes", "3 Hours", "1 Hour 30 Minutes"
+    text = re.sub(r"(?i)^\s*(?:\d+\s*(?:hours?|hrs?|minutes?|mins?)\s*)+\s*$", "", text, flags=re.MULTILINE)
+    
+    # Inline time ranges e.g. "09:00 AM - 05:00 PM" or "(7 Hours)"
     text = re.sub(r"\b\d{1,2}[:.]\d{2}\s*(?:am|pm)?\s*[\u2013\u2014\-]\s*\d{1,2}[:.]\d{2}\s*(?:am|pm)?\b", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"\(\s*\d+\s*(?:hour\vert{}hours\vert{}hr\vert{}hrs\vert{}minute\vert{}minutes\vert{}min\vert{}mins)\s*\)", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\(\s*\d+\s*(?:hour|hours|hr|hrs|minute|minutes|min|mins)\s*\)", "", text, flags=re.IGNORECASE)
 
+    # ------------------------------------------------------------------
+    # 4. CLEAN OCR SYMBOL ARTIFACTS & FORMATTING NOISE
+    # ------------------------------------------------------------------
+    # Replace weird bullet/OCR characters (e.g. ¢, \f-, ™) with clean text
+    text = re.sub(r"[¢\f\f-]", "", text)
+    # Remove standalone 1-2 character garbage lines (e.g., 'g', 'aS', 'oo ;')
+    text = re.sub(r"^\s*[a-zA-Z0-9;.,\-_]{1,2}\s*$", "", text, flags=re.MULTILINE)
+
+    # ------------------------------------------------------------------
+    # 5. DEDUPLICATE LINES & CLEAN BLANK LINES
+    # ------------------------------------------------------------------
     lines = [line.strip() for line in text.splitlines() if line.strip()]
-    cleaned = "\n".join(lines)
+    
+    # Remove exact duplicate consecutive lines (common in slide titles)
+    cleaned_lines = []
+    for line in lines:
+        if not cleaned_lines or line.lower() != cleaned_lines[-1].lower():
+            cleaned_lines.append(line)
 
+    cleaned = "\n".join(cleaned_lines)
+
+    # Cap to max characters
     return cleaned[:12000]
 
 
@@ -148,6 +190,13 @@ def clean_title_output(raw_title: str) -> str:
     clean = clean.title()
     clean = re.sub(r"('|\b’)([A-Z])\b", lambda m: m.group(1) + m.group(2).lower(), clean)
     return clean
+
+def fix_acronym_casing(text: str) -> str:
+    acronyms = ["AI", "PLC", "ISO", "DMAIC", "HRDF", "GRI", "SASB", "TCFD", "CMMS", "EOQ"]
+    for acronym in acronyms:
+        # Replaces word boundary matches like \bPlc\b or \bAi\b with proper uppercase
+        text = re.sub(rf"\b{acronym}\b", acronym, text, flags=re.IGNORECASE)
+    return text
 
 # ----------------------------------------------------------------------
 # 4️⃣ LLM Title Generation Call
