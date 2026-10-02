@@ -15,17 +15,20 @@ import pytesseract
 from rapidfuzz import fuzz, process
 import winsound
 import hashlib
+#V1.4 use unproblematic folder 215 min
+
+pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
 # ----------------------------------------------------------------------
 # 1️⃣ Configuration & Environment Setup
 # ----------------------------------------------------------------------
 load_dotenv()
 
-PDF_DIR = Path(r"D:\Intern_Sem7\restart\INDIGO courses")
-CATALOG_PATH = Path(r"D:\Intern_Sem7\catalog_cards.json")
+PDF_DIR = Path(r"D:\InternSem7-test\restart\INDIGO courses")
+CATALOG_PATH = Path(r"D:\InternSem7-test\catalog_cards.json")
 
 BATCH_NUM = 1
-BATCH_SIZE = 5
+BATCH_SIZE = 168
 
 OUTPUT_CSV = Path(f"course_titles_batch_{BATCH_NUM}.csv")
 
@@ -44,33 +47,40 @@ openrouter_client = OpenAI(
 )
 
 # ----------------------------------------------------------------------
-# 2️⃣ Model Definitions (4 Selected Models)
+# 2️⃣ Model Definitions (5 Selected Models)
 # ----------------------------------------------------------------------
 MODELS = [
-    # 1️⃣ Ollama - Moderate
+    # 1️⃣ Ollama - Lightweight
     {
         "id": "model_1",
-        "label": "llama3_2_3b",
+        "label": "llama3.2_3b",
         "type": "ollama",
         "name": "llama3.2:3b",
     },
-    # 2️⃣ Ollama - Advanced
+    # 2️⃣ Ollama - Moderate
     {
         "id": "model_2",
-        "label": "qwen3_5_latest",
+        "label": "qwen2.5_7b",
         "type": "ollama",
-        "name": "qwen3.5:latest",
+        "name": "qwen2.5:7b",
     },
-    # 3️⃣ OpenRouter - Moderate (Free)
+    # 3️⃣ Ollama - Advanced
     {
         "id": "model_3",
+        "label": "qwen3.8_27b",
+        "type": "ollama",
+        "name": "qwen3.8:27b",
+    },
+    # 4️⃣ OpenRouter - Moderate (Free)
+    {
+        "id": "model_4",
         "label": "nemotron_120b_free",
         "type": "openrouter",
         "name": "nvidia/nemotron-3-super-120b-a12b:free",
     },
-    # 4️⃣ OpenRouter - Advanced (Paid Benchmark)
+    # 5️⃣ OpenRouter - Advanced (Paid Benchmark)
     {
-        "id": "model_4",
+        "id": "model_5",
         "label": "gpt_4o_mini_paid",
         "type": "openrouter",
         "name": "openai/gpt-4o-mini",
@@ -201,7 +211,6 @@ def clean_title_output(raw_title: str) -> str:
     clean = re.sub(r"^(title|generated title):\s*", "", clean, flags=re.IGNORECASE)
     return clean.title()
 
-
 # ----------------------------------------------------------------------
 # 4️⃣ LLM Title Generation Call
 # ----------------------------------------------------------------------
@@ -255,7 +264,7 @@ def generate_title_llm(
 def main():
     print("🚀 Starting Batch Title Generation Pipeline...")
 
-    # Load catalog and catalog lookup map
+    # Load catalog map
     catalog = load_catalog(CATALOG_PATH)
     catalog_dict = {
         str(item["course_id"]): item
@@ -263,11 +272,11 @@ def main():
         if "course_id" in item
     }
 
-    # --- 1. PRE-DEDUPLICATE PDF FILES BY HASH ---
-    unique_pdf_map = get_unique_pdf_map(PDF_DIR)
-    unique_pdf_paths = list(unique_pdf_map.values())
+    # Load clean PDF list directly
+    pdf_files = list(PDF_DIR.rglob("*.pdf"))
+    print(f"✅ Loaded {len(pdf_files)} clean PDF files from '{PDF_DIR.name}'.")
 
-    # --- 2. LOAD EXISTING OUTPUT CSV TO SKIP COMPLETED IDS ---
+    # Load existing CSV results for skipping already processed IDs
     processed_ids = set()
     if OUTPUT_CSV.exists():
         try:
@@ -288,37 +297,31 @@ def main():
     target_ids = all_target_ids[start_idx:end_idx]
 
     print(f"📋 Loaded {len(all_target_ids)} total catalog items.")
-    print(f"⚙️️ Running Batch {BATCH_NUM}: Items {start_idx} to {end_idx - 1}")
+    print(f"⚙ Running Batch {BATCH_NUM}: Items {start_idx} to {end_idx - 1}")
 
     rows = []
 
     for idx, target_id in enumerate(target_ids, 1):
-        # --- STEP A: SKIPPED FILE CHECK ---
         if target_id in processed_ids:
             print(
-                f"⏩ [{idx}/{len(target_ids)}] Skipping ID: {target_id} (Already processed in {OUTPUT_CSV.name})"
+                f"⏩ [{idx}/{len(target_ids)}] Skipping ID: {target_id} (Already processed)"
             )
             continue
 
         matched_item = catalog_dict[target_id]
         original_title = matched_item.get("title", "")
 
-        # --- STEP B: MATCH CATALOG ITEM TO UNIQUE PDF ---
-        matched_pdf = find_matching_pdf(
-            target_id, original_title, unique_pdf_paths
-        )
+        matched_pdf = find_matching_pdf(target_id, original_title, pdf_files)
         if not matched_pdf:
             print(
                 f"⚠️ [{idx}/{len(target_ids)}] PDF not found for ID: {target_id}"
             )
             continue
 
-        # --- STEP C: EXTRACT & CLEAN TEXT ---
         raw_text = extract_raw_pdf_text(matched_pdf)
         cleaned_text = global_noise_cleaner(raw_text)
 
-        # --- STEP D: MISMATCH GUARD ---
-        # Verify catalog title matches content inside the first 1200 chars of extracted text
+        # Mismatch Guard Safety Check
         match_score = fuzz.partial_ratio(
             original_title.lower(), cleaned_text[:1200].lower()
         )
@@ -343,7 +346,6 @@ def main():
             "extracted_content_sample": cleaned_text[:1000],
         }
 
-        # --- STEP E: LLM TITLE GENERATION ---
         for m in MODELS:
             col_name = f"title_{m['label']}"
             latency_col = f"latency_sec_{m['label']}"
@@ -357,21 +359,34 @@ def main():
         rows.append(row_data)
         processed_ids.add(target_id)
 
-    # Append or write to output CSV
+    # Export to CSV with explicit column order
     if rows:
-        df_new = pd.DataFrame(rows)
+        base_cols = ["id", "pdf_file", "original_title", "extracted_content_sample"]
+        title_cols = [f"title_{m['label']}" for m in MODELS]
+        latency_cols = [f"latency_sec_{m['label']}" for m in MODELS]
+        ordered_columns = base_cols + title_cols + latency_cols
+
+        df_new = pd.DataFrame(rows)[ordered_columns]
+
         if OUTPUT_CSV.exists():
-            df_new.to_csv(
-                OUTPUT_CSV,
-                mode="a",
-                header=False,
-                index=False,
-                encoding="utf-8-sig",
-            )
+            # Verify existing schema matches new layout before appending
+            existing_cols = pd.read_csv(OUTPUT_CSV, nrows=0).columns.tolist()
+            if existing_cols != ordered_columns:
+                print("⚠️ Schema mismatch detected in existing CSV. Overwriting with new column layout...")
+                df_new.to_csv(OUTPUT_CSV, index=False, encoding="utf-8-sig")
+            else:
+                df_new.to_csv(
+                    OUTPUT_CSV,
+                    mode="a",
+                    header=False,
+                    index=False,
+                    encoding="utf-8-sig",
+                )
         else:
             df_new.to_csv(OUTPUT_CSV, index=False, encoding="utf-8-sig")
 
     print(f"\n✅ Batch {BATCH_NUM} Complete! Saved to '{OUTPUT_CSV}'.")
+
 
 
 if __name__ == "__main__":
