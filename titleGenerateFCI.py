@@ -15,7 +15,7 @@ import pytesseract
 from rapidfuzz import fuzz, process
 import winsound
 import hashlib
-#V1.4 use unproblematic folder
+#V1.4 use unproblematic folder 215 min
 
 pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
@@ -27,8 +27,8 @@ load_dotenv()
 PDF_DIR = Path(r"D:\InternSem7-test\restart\INDIGO courses")
 CATALOG_PATH = Path(r"D:\InternSem7-test\catalog_cards.json")
 
-BATCH_NUM = 2
-BATCH_SIZE = 25
+BATCH_NUM = 1
+BATCH_SIZE = 168
 
 OUTPUT_CSV = Path(f"course_titles_batch_{BATCH_NUM}.csv")
 
@@ -47,33 +47,40 @@ openrouter_client = OpenAI(
 )
 
 # ----------------------------------------------------------------------
-# 2️⃣ Model Definitions (4 Selected Models)
+# 2️⃣ Model Definitions (5 Selected Models)
 # ----------------------------------------------------------------------
 MODELS = [
-    # 1️⃣ Ollama - Low
+    # 1️⃣ Ollama - Lightweight
     {
         "id": "model_1",
+        "label": "llama3.2_3b",
+        "type": "ollama",
+        "name": "llama3.2:3b",
+    },
+    # 2️⃣ Ollama - Moderate
+    {
+        "id": "model_2",
         "label": "qwen2.5_7b",
         "type": "ollama",
         "name": "qwen2.5:7b",
     },
-    # 2️⃣ Ollama - Advanced
+    # 3️⃣ Ollama - Advanced
     {
-        "id": "model_2",
-        "label": "qwen3_8_27b",
+        "id": "model_3",
+        "label": "qwen3.8_27b",
         "type": "ollama",
         "name": "qwen3.8:27b",
     },
-    # 3️⃣ OpenRouter - Moderate (Free)
+    # 4️⃣ OpenRouter - Moderate (Free)
     {
-        "id": "model_3",
+        "id": "model_4",
         "label": "nemotron_120b_free",
         "type": "openrouter",
         "name": "nvidia/nemotron-3-super-120b-a12b:free",
     },
-    # 4️⃣ OpenRouter - Advanced (Paid Benchmark)
+    # 5️⃣ OpenRouter - Advanced (Paid Benchmark)
     {
-        "id": "model_4",
+        "id": "model_5",
         "label": "gpt_4o_mini_paid",
         "type": "openrouter",
         "name": "openai/gpt-4o-mini",
@@ -130,55 +137,61 @@ def load_catalog(path: Path) -> list:
         return json.load(f)
 
 
-def global_noise_cleaner(text: str) -> str:
-    # Remove brand header/footer noise
-    text = re.sub(r"(?i)\bby\s+elite\s+indigo\b", "", text)
-    text = re.sub(r"(?i)\belite\s+indigo\s+(sdn\s+bhd|pte\s+ltd)?\b", "", text)
-    text = re.sub(
-        r"https?://\S+|www\.\S+|\b\S*eliteindigo\S*\b",
-        "",
-        text,
-        flags=re.IGNORECASE,
-    )
-    
-    # URL / Email / HRDF Noise
-    text = re.sub(r"https?://\S+|www\.\S+|\b\S*eliteindigo\S*\b", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b", "", text)
-    text = re.sub(r"(?i)100%\s+hrdf\s+claimable|hrdcorp\s+claimable|registered\s+hrdcorp\s+training\s+provider", "", text)
-    
-    # Time / Schedule noise
-    text = re.sub(r"\b\d{1,2}[:.]\d{2}\s*(?:am|pm)?\s*[\u2013\u2014\-]\s*\d{1,2}[:.]\d{2}\s*(?:am|pm)?\b", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"\(\s*\d+\s*(?:hour|hours|hr|hrs|minute|minutes|min|mins)\s*\)", "", text, flags=re.IGNORECASE)
-    
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    return "\n".join(lines)
-
-
 def extract_raw_pdf_text(pdf_path: Path) -> str:
-    """Extracts native text and uses Tesseract OCR as a fallback per page."""
+    """Extracts native text and seamlessly falls back to Tesseract OCR for scanned pages."""
     doc = fitz.open(pdf_path)
     full_text = []
 
-    for page in doc:
-        page_text = page.get_text("text").strip()
+    for page_idx, page in enumerate(doc, start=1):
+        native_text = page.get_text("text").strip()
 
-        # If page text is short/missing, try OCR fallback
-        if len(page_text) < 300:
+        # If native text is insufficient (<150 chars), perform OCR
+        if len(native_text) < 150:
             try:
                 pix = page.get_pixmap(dpi=300)
                 img = Image.open(io.BytesIO(pix.tobytes("png")))
                 ocr_text = pytesseract.image_to_string(img).strip()
 
-                if len(ocr_text) > len(page_text):
-                    page_text = f"{page_text}\n{ocr_text}"
+                # Use OCR output if it extracted substantially more text
+                if len(ocr_text) > len(native_text):
+                    page_text = ocr_text
+                else:
+                    page_text = native_text
             except Exception:
-                pass  # Fallback to native page_text if OCR fails
+                page_text = native_text
+        else:
+            page_text = native_text
 
-        if page_text:
-            full_text.append(page_text)
+        if page_text.strip():
+            full_text.append(page_text.strip())
 
+    doc.close()
     return "\n\n".join(full_text)
 
+
+def global_noise_cleaner(text: str) -> str:
+    """Strips common marketing headers, URLs, contact info, and standard footer boilerplate."""
+    # Remove brand header/footer noise
+    text = re.sub(r"(?i)\bby\s+elite\s+indigo\b", "", text)
+    text = re.sub(r"(?i)\belite\s+indigo\s+(sdn\s+bhd|pte\s+ltd)?\b", "", text)
+    text = re.sub(r"https?://\S+|www\.\S+|\b\S*eliteindigo\S*\b", "", text, flags=re.IGNORECASE)
+
+    # Email & Phone / HRDF Noise
+    text = re.sub(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b", "", text)
+    text = re.sub(r"\+?\d{1,4}[-.\s]?\(?\d{1,3}\)?[-.\s]?\d{3,4}[-.\s]?\d{3,4}", "", text)
+    text = re.sub(r"(?i)100%\s+hrdf\s+claimable|hrdcorp\s+claimable|registered\s+hrdcorp\s+training\s+provider", "", text)
+
+    # Time / Schedule noise
+    text = re.sub(r"\b\d{1,2}[:.]\d{2}\s*(?:am|pm)?\s*[\u2013\u2014\-]\s*\d{1,2}[:.]\d{2}\s*(?:am|pm)?\b", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\(\s*\d+\s*(?:hour|hours|hr|hrs|minute|minutes|min|mins)\s*\)", "", text, flags=re.IGNORECASE)
+
+    # Clean whitespace line by line
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    cleaned = "\n".join(lines)
+
+    # Optional safety cap: keep maximum first 12,000 characters (~2,000 words)
+    # Ensures prompt stays within LLM window while keeping 100% of content for all your current PDFs
+    return cleaned[:12000]
 
 def find_matching_pdf(
     target_id: str, target_title: str, pdf_files: list
@@ -257,7 +270,7 @@ def generate_title_llm(
 def main():
     print("🚀 Starting Batch Title Generation Pipeline...")
 
-    # Load catalog and catalog lookup map
+    # Load catalog map
     catalog = load_catalog(CATALOG_PATH)
     catalog_dict = {
         str(item["course_id"]): item
@@ -265,11 +278,11 @@ def main():
         if "course_id" in item
     }
 
-    # --- 1. PRE-DEDUPLICATE PDF FILES BY HASH ---
-    unique_pdf_map = get_unique_pdf_map(PDF_DIR)
-    unique_pdf_paths = list(unique_pdf_map.values())
+    # Load clean PDF list directly
+    pdf_files = list(PDF_DIR.rglob("*.pdf"))
+    print(f"✅ Loaded {len(pdf_files)} clean PDF files from '{PDF_DIR.name}'.")
 
-    # --- 2. LOAD EXISTING OUTPUT CSV TO SKIP COMPLETED IDS ---
+    # Load existing CSV results for skipping already processed IDs
     processed_ids = set()
     if OUTPUT_CSV.exists():
         try:
@@ -290,40 +303,34 @@ def main():
     target_ids = all_target_ids[start_idx:end_idx]
 
     print(f"📋 Loaded {len(all_target_ids)} total catalog items.")
-    print(f"⚙️️ Running Batch {BATCH_NUM}: Items {start_idx} to {end_idx - 1}")
+    print(f"⚙ Running Batch {BATCH_NUM}: Items {start_idx} to {end_idx - 1}")
 
     rows = []
 
     for idx, target_id in enumerate(target_ids, 1):
-        # --- STEP A: SKIPPED FILE CHECK ---
         if target_id in processed_ids:
             print(
-                f"⏩ [{idx}/{len(target_ids)}] Skipping ID: {target_id} (Already processed in {OUTPUT_CSV.name})"
+                f"⏩ [{idx}/{len(target_ids)}] Skipping ID: {target_id} (Already processed)"
             )
             continue
 
         matched_item = catalog_dict[target_id]
         original_title = matched_item.get("title", "")
 
-        # --- STEP B: MATCH CATALOG ITEM TO UNIQUE PDF ---
-        matched_pdf = find_matching_pdf(
-            target_id, original_title, unique_pdf_paths
-        )
+        matched_pdf = find_matching_pdf(target_id, original_title, pdf_files)
         if not matched_pdf:
             print(
                 f"⚠️ [{idx}/{len(target_ids)}] PDF not found for ID: {target_id}"
             )
             continue
 
-        # --- STEP C: EXTRACT & CLEAN TEXT ---
         raw_text = extract_raw_pdf_text(matched_pdf)
         cleaned_text = global_noise_cleaner(raw_text)
 
-        # --- STEP D: MISMATCH GUARD ---
-        # Verify catalog title matches content inside the first 1200 chars of extracted text
-        match_score = fuzz.partial_ratio(
-            original_title.lower(), cleaned_text[:1200].lower()
-        )
+        # Mismatch Guard Safety Check: Search first 4000 chars (spans pages 1-2)
+        check_window = cleaned_text[:4000].lower()
+        match_score = fuzz.partial_ratio(original_title.lower(), check_window)
+        
         if match_score < 45:
             print(
                 f"\n⚠️ [{idx}/{len(target_ids)}] MISMATCH GUARD TRIGGERED for ID: {target_id}"
@@ -342,10 +349,10 @@ def main():
             "id": target_id,
             "pdf_file": matched_pdf.name,
             "original_title": original_title,
-            "extracted_content_sample": cleaned_text[:1000],
+            # Increased from 1000 to 2000 so you can inspect more content in the CSV
+            "extracted_content_sample": cleaned_text[:4000],
         }
 
-        # --- STEP E: LLM TITLE GENERATION ---
         for m in MODELS:
             col_name = f"title_{m['label']}"
             latency_col = f"latency_sec_{m['label']}"
@@ -359,21 +366,34 @@ def main():
         rows.append(row_data)
         processed_ids.add(target_id)
 
-    # Append or write to output CSV
+    # Export to CSV with explicit column order
     if rows:
-        df_new = pd.DataFrame(rows)
+        base_cols = ["id", "pdf_file", "original_title", "extracted_content_sample"]
+        title_cols = [f"title_{m['label']}" for m in MODELS]
+        latency_cols = [f"latency_sec_{m['label']}" for m in MODELS]
+        ordered_columns = base_cols + title_cols + latency_cols
+
+        df_new = pd.DataFrame(rows)[ordered_columns]
+
         if OUTPUT_CSV.exists():
-            df_new.to_csv(
-                OUTPUT_CSV,
-                mode="a",
-                header=False,
-                index=False,
-                encoding="utf-8-sig",
-            )
+            # Verify existing schema matches new layout before appending
+            existing_cols = pd.read_csv(OUTPUT_CSV, nrows=0).columns.tolist()
+            if existing_cols != ordered_columns:
+                print("⚠️ Schema mismatch detected in existing CSV. Overwriting with new column layout...")
+                df_new.to_csv(OUTPUT_CSV, index=False, encoding="utf-8-sig")
+            else:
+                df_new.to_csv(
+                    OUTPUT_CSV,
+                    mode="a",
+                    header=False,
+                    index=False,
+                    encoding="utf-8-sig",
+                )
         else:
             df_new.to_csv(OUTPUT_CSV, index=False, encoding="utf-8-sig")
 
     print(f"\n✅ Batch {BATCH_NUM} Complete! Saved to '{OUTPUT_CSV}'.")
+
 
 
 if __name__ == "__main__":
