@@ -1,11 +1,9 @@
-# V1.4 use unproblematic folder 215 min, v1.5 fix capitalization, CSV Progress Loss Risk v1.6 Local X Cloud llm parallel, more noise elimination
-# V1.7 Added JSON edge-case content overriding support
+# V1.8 Fully Fixed JSON Edge Cases, Universal Schema Merging & Safe Cleaning
 import io
 import json
 import os
 import re
 import time
-import hashlib
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -16,7 +14,6 @@ import pandas as pd
 from PIL import Image
 import pytesseract
 from rapidfuzz import fuzz, process
-import winsound
 from dotenv import load_dotenv
 
 # ----------------------------------------------------------------------
@@ -28,7 +25,7 @@ pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tessera
 
 PDF_DIR = Path(r"D:\InternSem7-test\restart\INDIGO courses")
 CATALOG_PATH = Path(r"D:\InternSem7-test\catalog_cards.json")
-EDGE_CASES_PATH = Path(r"edgeCases.json")  # Path to your edge cases JSON file
+EDGE_CASES_PATH = Path(r"edgeCases.json")
 
 BATCH_NUM = 1
 BATCH_SIZE = 168
@@ -49,12 +46,12 @@ openrouter_client = OpenAI(
 # 2️⃣ Model Definitions
 # ----------------------------------------------------------------------
 MODELS = [
-    # Ollama - Local (Run sequentially to protect VRAM)
+    # Ollama - Local (Run sequentially)
     {"id": "model_1", "label": "llama3.2_3b", "type": "ollama", "name": "llama3.2:3b"},
     {"id": "model_2", "label": "qwen2.5_7b", "type": "ollama", "name": "qwen2.5:7b"},
     {"id": "model_3", "label": "qwen3.8_27b", "type": "ollama", "name": "qwen3.8:27b"},
     
-    # OpenRouter - Cloud (Run concurrently in parallel threads)
+    # OpenRouter - Cloud (Run in parallel threads)
     {"id": "model_4", "label": "nemotron_120b_free", "type": "openrouter", "name": "nvidia/nemotron-3-super-120b-a12b:free"},
     {"id": "model_5", "label": "gpt_4o_mini_paid", "type": "openrouter", "name": "openai/gpt-4o-mini"},
 ]
@@ -72,7 +69,7 @@ RULES:
 1. CAPITALIZATION: Output MUST be in Title Case (e.g., "Advanced Strategic Management for Corporate Leaders").
 2. LENGTH: Keep the title between 4 and 15 words. Help recommendation agents decide suitable recommendations by reading the title alone.
 3. CONTENT FOCUS: Base the title purely on core skills, learning outcomes, and technical domains in the text. Ignore noise like dates, break times, venues, or HRDF details.
-4. STRICT FORMAT: Return ONLY the title string. Do NOT use quotation marks, markdown wrappers, or conversational prefixes (e.g., DO NOT say "Here is the title:").
+4. STRICT FORMAT: Return ONLY the title string. Do NOT use quotation marks, markdown wrappers, or conversational prefixes.
 """
 
 
@@ -84,7 +81,7 @@ def load_json_file(path: Path) -> list:
 
 
 def extract_raw_pdf_text(pdf_path: Path) -> str:
-    """Extracts native text and seamlessly falls back to Tesseract OCR for scanned pages."""
+    """Extracts native text and falls back to Tesseract OCR for scanned pages."""
     doc = fitz.open(pdf_path)
     full_text = []
 
@@ -111,9 +108,7 @@ def extract_raw_pdf_text(pdf_path: Path) -> str:
 
 
 def global_noise_cleaner(text: str) -> str:
-    """Strips common marketing headers, schedule noise, contact info, 
-    and cuts off trailing boilerplate pages.
-    """
+    """Strips common marketing headers and schedule noise from raw PDF dumps."""
     text = re.split(r"(?i)\b(?:WHY\s+CHOOSE\s+US|ABOUT\s+ELITE\s+INDIGO)\b", text)[0]
 
     text = re.sub(r"(?i)\bby\s+elite\s+indigo\b", "", text)
@@ -142,8 +137,7 @@ def global_noise_cleaner(text: str) -> str:
         if not cleaned_lines or line.lower() != cleaned_lines[-1].lower():
             cleaned_lines.append(line)
 
-    cleaned = "\n".join(cleaned_lines)
-    return cleaned[:12000]
+    return "\n".join(cleaned_lines)[:12000]
 
 
 def find_matching_pdf(target_id: str, target_title: str, pdf_files: list) -> Path | None:
@@ -163,7 +157,6 @@ def find_matching_pdf(target_id: str, target_title: str, pdf_files: list) -> Pat
 
 
 def clean_title_output(raw_title: str) -> str:
-    """Strips quotes, structural headers, and applies clean Title Case without apostrophe artifacts."""
     clean = re.sub(r'^[#*"`\s]+|[#*"`\s]+$', "", raw_title.strip())
     clean = re.sub(r"^(title|generated title):\s*", "", clean, flags=re.IGNORECASE)
     clean = clean.title()
@@ -171,11 +164,13 @@ def clean_title_output(raw_title: str) -> str:
     return clean
 
 
-def fix_acronym_casing(text: str) -> str:
-    acronyms = ["AI", "PLC", "ISO", "DMAIC", "HRDF", "GRI", "SASB", "TCFD", "CMMS", "EOQ"]
-    for acronym in acronyms:
-        text = re.sub(rf"\b{acronym}\b", acronym, text, flags=re.IGNORECASE)
-    return text
+def safe_beep():
+    """Cross-platform completion chime."""
+    try:
+        import winsound
+        winsound.MessageBeep(winsound.MB_OK)
+    except Exception:
+        print("\a")  # Terminal bell fallback for non-Windows platforms
 
 # ----------------------------------------------------------------------
 # 4️⃣ LLM Title Generation Call
@@ -212,9 +207,8 @@ def generate_title_llm(model_config: dict, cleaned_text: str, max_retries: int =
             return formatted_title, elapsed_time
 
         except Exception as e:
-            sleep_time = 2**attempt
             if attempt < max_retries:
-                time.sleep(sleep_time)
+                time.sleep(2 ** attempt)
                 continue
 
             elapsed_time = round(time.time() - start_time, 2)
@@ -226,24 +220,34 @@ def generate_title_llm(model_config: dict, cleaned_text: str, max_retries: int =
 def main():
     print("🚀 Starting Hybrid Parallel Batch Title Generation Pipeline...")
 
+    # Load catalog items into dictionary
     catalog = load_json_file(CATALOG_PATH)
-    catalog_dict = {
-        str(item["course_id"]): item
+    master_dict = {
+        str(item.get("course_id") or item.get("id")): item
         for item in catalog
-        if "course_id" in item
+        if item.get("course_id") or item.get("id")
     }
 
-    # Load edge cases mapping (course_id -> content string)
+    # Load edge cases into dictionary (case-insensitive key handling)
     edge_cases_list = load_json_file(EDGE_CASES_PATH)
-    edge_cases_dict = {
-        str(item["course_id"]): item.get("Content") or item.get("content", "")
-        for item in edge_cases_list
-        if "course_id" in item
-    }  #[cite: 2]
-    print(f"📌 Loaded {len(edge_cases_dict)} edge case content overrides.")
+    edge_cases_dict = {}
+    for item in edge_cases_list:
+        c_id = str(item.get("course_id") or item.get("id", ""))
+        if c_id:
+            edge_cases_dict[c_id] = {
+                "title": item.get("title", ""),
+                "content": item.get("Content") or item.get("content", "")
+            }
+
+    # Merge edge cases into master dictionary so they are never missed
+    for ec_id, ec_data in edge_cases_dict.items():
+        if ec_id not in master_dict:
+            master_dict[ec_id] = {"course_id": ec_id, "title": ec_data["title"]}
+
+    print(f"📌 Master items: {len(master_dict)} | Edge Case Overrides: {len(edge_cases_dict)}")
 
     pdf_files = list(PDF_DIR.rglob("*.pdf"))
-    print(f"✅ Loaded {len(pdf_files)} clean PDF files from '{PDF_DIR.name}'.")
+    print(f"✅ Loaded {len(pdf_files)} PDF files from '{PDF_DIR.name}'.")
 
     processed_ids = set()
     if OUTPUT_CSV.exists():
@@ -255,13 +259,12 @@ def main():
         except Exception as e:
             print(f"⚠️ Could not read existing CSV ({e}). Starting clean.")
 
-    all_target_ids = list(catalog_dict.keys())
+    all_target_ids = list(master_dict.keys())
     start_idx = (BATCH_NUM - 1) * BATCH_SIZE
     end_idx = min(BATCH_NUM * BATCH_SIZE, len(all_target_ids))
     target_ids = all_target_ids[start_idx:end_idx]
 
-    print(f"📋 Loaded {len(all_target_ids)} total catalog items.")
-    print(f"⚙ Running Batch {BATCH_NUM}: Items {start_idx} to {end_idx - 1}")
+    print(f"⚙ Running Batch {BATCH_NUM}: Items {start_idx} to {end_idx - 1} of {len(all_target_ids)}")
 
     base_cols = ["id", "pdf_file", "original_title", "extracted_content_sample"]
     title_cols = [f"title_{m['label']}" for m in MODELS]
@@ -273,14 +276,17 @@ def main():
             print(f"⏩ [{idx}/{len(target_ids)}] Skipping ID: {target_id} (Already processed)")
             continue
 
-        matched_item = catalog_dict[target_id]
-        original_title = matched_item.get("title", "")
+        item_meta = master_dict[target_id]
+        original_title = item_meta.get("title") or item_meta.get("original_title", "")
 
-        # --- EDGE CASE CHECK ---
+        # --- CONTENT EXTRACTION (JSON Edge Case vs PDF) ---
         if target_id in edge_cases_dict:
-            print(f"⚙️ [{idx}/{len(target_ids)}] ID: {target_id} found in edgeCases.json. Using direct content.")
+            print(f"⚙️ [{idx}/{len(target_ids)}] ID: {target_id} loaded directly from {EDGE_CASES_PATH.name}")
             pdf_filename = "N/A (JSON Edge Case)"
-            raw_text = edge_cases_dict[target_id]  # Read directly from JSON content attribute[cite: 2]
+            # Use JSON content as-is (bypass noise cleaner for pre-curated text)
+            cleaned_text = edge_cases_dict[target_id]["content"][:12000]
+            if not original_title:
+                original_title = edge_cases_dict[target_id]["title"]
         else:
             matched_pdf = find_matching_pdf(target_id, original_title, pdf_files)
             if not matched_pdf:
@@ -289,18 +295,15 @@ def main():
 
             pdf_filename = matched_pdf.name
             raw_text = extract_raw_pdf_text(matched_pdf)
+            cleaned_text = global_noise_cleaner(raw_text)
 
-        cleaned_text = global_noise_cleaner(raw_text)
-
-        # Mismatch check only applies to normal PDF extractions
-        if target_id not in edge_cases_dict:
+            # Mismatch guard check on raw PDF text
             check_window = cleaned_text[:4000].lower()
             match_score = fuzz.partial_ratio(original_title.lower(), check_window)
-            
             if match_score < 45:
                 print(f"\n⚠️ [{idx}/{len(target_ids)}] MISMATCH GUARD TRIGGERED for ID: {target_id}")
-                print(f"   Catalog Title: '{original_title}' vs PDF File: '{pdf_filename}' (Score: {match_score:.1f})")
-                print("   ⏩ Skipping generation to prevent invalid output.\n")
+                print(f"   Catalog Title: '{original_title}' vs PDF: '{pdf_filename}' (Score: {match_score:.1f})")
+                print("   ⏩ Skipping generation.\n")
                 continue
 
         print(f"\n[{idx}/{len(target_ids)}] ID: {target_id} | Original Title: {original_title}")
@@ -328,7 +331,7 @@ def main():
                 openrouter_results[t_col] = t_val
                 openrouter_results[l_col] = l_val
 
-        # B. Ollama Local Calls Sequentially (Single Thread / Protected GPU)
+        # B. Ollama Local Calls Sequentially
         ollama_results = {}
         for m in OLLAMA_MODELS:
             col_name = f"title_{m['label']}"
@@ -342,7 +345,7 @@ def main():
         row_data.update(openrouter_results)
         row_data.update(ollama_results)
 
-        # Immediate Save per course item
+        # Append immediately per course item
         df_single = pd.DataFrame([row_data])[ordered_columns]
         file_exists = OUTPUT_CSV.exists()
         
@@ -361,4 +364,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-    winsound.MessageBeep(winsound.MB_OK)
+    safe_beep()
