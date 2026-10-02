@@ -1,10 +1,12 @@
+#V1.4 use unproblematic folder 215 min, v1.5 fix capitalization, CSV Progress Loss Risk v1.6 Local X Cloud llm parallel
 import io
 import json
 import os
 import re
 import time
+import hashlib
 from pathlib import Path
-from dotenv import load_dotenv
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import fitz  # PyMuPDF
 import ollama
@@ -14,8 +16,7 @@ from PIL import Image
 import pytesseract
 from rapidfuzz import fuzz, process
 import winsound
-import hashlib
-#V1.4 use unproblematic folder 215 min, v1.5 fix capitalization, CSV Progress Loss Risk
+from dotenv import load_dotenv
 
 # ----------------------------------------------------------------------
 # 1️⃣ Configuration & Environment Setup
@@ -43,40 +44,21 @@ openrouter_client = OpenAI(
 )
 
 # ----------------------------------------------------------------------
-# 2️⃣ Model Definitions (5 Selected Models)
+# 2️⃣ Model Definitions
 # ----------------------------------------------------------------------
 MODELS = [
-    {
-        "id": "model_1",
-        "label": "llama3.2_3b",
-        "type": "ollama",
-        "name": "llama3.2:3b",
-    },
-    {
-        "id": "model_2",
-        "label": "qwen2.5_7b",
-        "type": "ollama",
-        "name": "qwen2.5:7b",
-    },
-    {
-        "id": "model_3",
-        "label": "qwen3.8_27b",
-        "type": "ollama",
-        "name": "qwen3.8:27b",
-    },
-    {
-        "id": "model_4",
-        "label": "nemotron_120b_free",
-        "type": "openrouter",
-        "name": "nvidia/nemotron-3-super-120b-a12b:free",
-    },
-    {
-        "id": "model_5",
-        "label": "gpt_4o_mini_paid",
-        "type": "openrouter",
-        "name": "openai/gpt-4o-mini",
-    },
+    # Ollama - Local (Run sequentially to protect VRAM)
+    {"id": "model_1", "label": "llama3.2_3b", "type": "ollama", "name": "llama3.2:3b"},
+    {"id": "model_2", "label": "qwen2.5_7b", "type": "ollama", "name": "qwen2.5:7b"},
+    {"id": "model_3", "label": "qwen3.8_27b", "type": "ollama", "name": "qwen3.8:27b"},
+    
+    # OpenRouter - Cloud (Run concurrently in parallel threads)
+    {"id": "model_4", "label": "nemotron_120b_free", "type": "openrouter", "name": "nvidia/nemotron-3-super-120b-a12b:free"},
+    {"id": "model_5", "label": "gpt_4o_mini_paid", "type": "openrouter", "name": "openai/gpt-4o-mini"},
 ]
+
+OLLAMA_MODELS = [m for m in MODELS if m["type"] == "ollama"]
+OPENROUTER_MODELS = [m for m in MODELS if m["type"] == "openrouter"]
 
 # ----------------------------------------------------------------------
 # 3️⃣ Prompts & Utilities
@@ -92,30 +74,6 @@ RULES:
 """
 
 
-def get_file_hash(file_path: Path) -> str:
-    """Computes MD5 hash to detect duplicate files regardless of filename."""
-    hasher = hashlib.md5()
-    with open(file_path, "rb") as f:
-        hasher.update(f.read(65536))
-    return hasher.hexdigest()
-
-
-def get_unique_pdf_map(pdf_dir: Path) -> dict[str, Path]:
-    """Scans PDF_DIR, removes content duplicates via hashing, and returns a lookup dict."""
-    seen_hashes = set()
-    unique_pdfs = {}
-
-    print("🔍 Indexing and deduplicating PDF directory...")
-    for pdf_path in pdf_dir.rglob("*.pdf"):
-        file_hash = get_file_hash(pdf_path)
-        if file_hash not in seen_hashes:
-            seen_hashes.add(file_hash)
-            unique_pdfs[pdf_path.name.lower()] = pdf_path
-
-    print(f"✅ Found {len(unique_pdfs)} unique PDF files (filtered out duplicates).\n")
-    return unique_pdfs
-
-
 def load_catalog(path: Path) -> list:
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
@@ -126,7 +84,7 @@ def extract_raw_pdf_text(pdf_path: Path) -> str:
     doc = fitz.open(pdf_path)
     full_text = []
 
-    for page_idx, page in enumerate(doc, start=1):
+    for page in doc:
         native_text = page.get_text("text").strip()
 
         if len(native_text) < 150:
@@ -135,10 +93,7 @@ def extract_raw_pdf_text(pdf_path: Path) -> str:
                 img = Image.open(io.BytesIO(pix.tobytes("png")))
                 ocr_text = pytesseract.image_to_string(img).strip()
 
-                if len(ocr_text) > len(native_text):
-                    page_text = ocr_text
-                else:
-                    page_text = native_text
+                page_text = ocr_text if len(ocr_text) > len(native_text) else native_text
             except Exception:
                 page_text = native_text
         else:
@@ -190,11 +145,7 @@ def clean_title_output(raw_title: str) -> str:
     """Strips quotes, structural headers, and applies clean Title Case without apostrophe artifacts."""
     clean = re.sub(r'^[#*"`\s]+|[#*"`\s]+$', "", raw_title.strip())
     clean = re.sub(r"^(title|generated title):\s*", "", clean, flags=re.IGNORECASE)
-    
-    # Capitalize title cleanly
     clean = clean.title()
-    
-    # Fix apostrophe possessive artifacts e.g. "Tzu'S" -> "Tzu's"
     clean = re.sub(r"('|\b’)([A-Z])\b", lambda m: m.group(1) + m.group(2).lower(), clean)
     return clean
 
@@ -245,7 +196,7 @@ def generate_title_llm(model_config: dict, cleaned_text: str, max_retries: int =
 # 5️⃣ Main Pipeline Execution
 # ----------------------------------------------------------------------
 def main():
-    print("🚀 Starting Batch Title Generation Pipeline...")
+    print("🚀 Starting Hybrid Parallel Batch Title Generation Pipeline...")
 
     catalog = load_catalog(CATALOG_PATH)
     catalog_dict = {
@@ -263,9 +214,7 @@ def main():
             existing_df = pd.read_csv(OUTPUT_CSV)
             if "id" in existing_df.columns:
                 processed_ids = set(existing_df["id"].astype(str).tolist())
-                print(
-                    f"📋 Found {len(processed_ids)} previously processed items in '{OUTPUT_CSV.name}'.\n"
-                )
+                print(f"📋 Found {len(processed_ids)} previously processed items in '{OUTPUT_CSV.name}'.\n")
         except Exception as e:
             print(f"⚠️ Could not read existing CSV ({e}). Starting clean.")
 
@@ -316,17 +265,37 @@ def main():
             "extracted_content_sample": cleaned_text[:4000],
         }
 
-        for m in MODELS:
+        # --- HYBRID PARALLEL MODEL EXECUTION ---
+        
+        # A. OpenRouter API Calls in Parallel Threads
+        def run_openrouter_task(m):
+            print(f"  ├─ [Cloud Parallel] Requesting {m['label']}...")
+            gen_title, latency = generate_title_llm(m, cleaned_text)
+            return f"title_{m['label']}", gen_title, f"latency_sec_{m['label']}", latency
+
+        openrouter_results = {}
+        with ThreadPoolExecutor(max_workers=len(OPENROUTER_MODELS)) as executor:
+            futures = [executor.submit(run_openrouter_task, m) for m in OPENROUTER_MODELS]
+            for future in as_completed(futures):
+                t_col, t_val, l_col, l_val = future.result()
+                openrouter_results[t_col] = t_val
+                openrouter_results[l_col] = l_val
+
+        # B. Ollama Local Calls Sequentially (Single Thread / Protected GPU)
+        ollama_results = {}
+        for m in OLLAMA_MODELS:
             col_name = f"title_{m['label']}"
             latency_col = f"latency_sec_{m['label']}"
-
-            print(f"  ├─ Generating with {m['label']} ({m['type']})...")
+            print(f"  ├─ [Local Sequential] Generating with {m['label']}...")
             gen_title, latency = generate_title_llm(m, cleaned_text)
+            ollama_results[col_name] = gen_title
+            ollama_results[latency_col] = latency
 
-            row_data[col_name] = gen_title
-            row_data[latency_col] = latency
+        # Combine results
+        row_data.update(openrouter_results)
+        row_data.update(ollama_results)
 
-        # Immediate Atomic Save per course item
+        # Immediate Save per course item
         df_single = pd.DataFrame([row_data])[ordered_columns]
         file_exists = OUTPUT_CSV.exists()
         
