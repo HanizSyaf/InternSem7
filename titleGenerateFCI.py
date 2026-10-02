@@ -1,4 +1,5 @@
-#V1.4 use unproblematic folder 215 min, v1.5 fix capitalization, CSV Progress Loss Risk v1.6 Local X Cloud llm parallel, more noise elimination
+# V1.4 use unproblematic folder 215 min, v1.5 fix capitalization, CSV Progress Loss Risk v1.6 Local X Cloud llm parallel, more noise elimination
+# V1.7 Added JSON edge-case content overriding support
 import io
 import json
 import os
@@ -27,9 +28,10 @@ pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tessera
 
 PDF_DIR = Path(r"D:\InternSem7-test\restart\INDIGO courses")
 CATALOG_PATH = Path(r"D:\InternSem7-test\catalog_cards.json")
+EDGE_CASES_PATH = Path(r"edgeCases.json")  # Path to your edge cases JSON file
 
-BATCH_NUM = 3
-BATCH_SIZE = 54 #30(34min) +15 (17min) +54+69=168 good for not crash
+BATCH_NUM = 1
+BATCH_SIZE = 168
 
 OUTPUT_CSV = Path(f"course_titles_batch_{BATCH_NUM}.csv")
 
@@ -74,7 +76,9 @@ RULES:
 """
 
 
-def load_catalog(path: Path) -> list:
+def load_json_file(path: Path) -> list:
+    if not path.exists():
+        return []
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
@@ -110,15 +114,8 @@ def global_noise_cleaner(text: str) -> str:
     """Strips common marketing headers, schedule noise, contact info, 
     and cuts off trailing boilerplate pages.
     """
-    # ------------------------------------------------------------------
-    # 1. CUT OFF END-OF-DOCUMENT MARKETING / FOOTER PAGES
-    # Cut off text starting from 'WHY CHOOSE US' or 'ABOUT ELITE INDIGO'
-    # ------------------------------------------------------------------
     text = re.split(r"(?i)\b(?:WHY\s+CHOOSE\s+US|ABOUT\s+ELITE\s+INDIGO)\b", text)[0]
 
-    # ------------------------------------------------------------------
-    # 2. STRIP CONTACT INFO, URLS & BRANDING
-    # ------------------------------------------------------------------
     text = re.sub(r"(?i)\bby\s+elite\s+indigo\b", "", text)
     text = re.sub(r"(?i)\belite\s+indigo\s+(sdn\s+bhd|pte\s+ltd)?\b", "", text)
     text = re.sub(r"https?://\S+|www\.\S+|\b\S*eliteindigo\S*\b", "", text, flags=re.IGNORECASE)
@@ -126,44 +123,26 @@ def global_noise_cleaner(text: str) -> str:
     text = re.sub(r"\+?\d{1,4}[-.\s]?\(?\d{1,3}\)?[-.\s]?\d{3,4}[-.\s]?\d{3,4}", "", text)
     text = re.sub(r"(?i)100%\s+hrdf\s+claimable|hrdcorp\s+claimable|registered\s+hrdcorp\s+training\s+provider", "", text)
 
-    # ------------------------------------------------------------------
-    # 3. STRIP SCHEDULE & TIME NOISE
-    # Removes 'Lunch', '30 Minutes', '1 Hour', '2 Hours', 'Course Schedule', etc.
-    # ------------------------------------------------------------------
-    # Standalone Schedule Headers & Timings
     text = re.sub(r"(?i)\b(?:course\s+schedule|day/time|recap\s*&\s*summary\s*of\s*day\s*\d+)\b", "", text)
     text = re.sub(r"(?i)\b\d+\s*(?:full-day|full\s*day)\s*workshop\b", "", text)
     text = re.sub(r"(?i)^\s*(?:lunch|opening\s*&\s*introduction|registration\s*&\s*ice-breaking)\s*$", "", text, flags=re.MULTILINE)
     
-    # Standalone duration lines e.g. "1 Hour", "30 Minutes", "3 Hours", "1 Hour 30 Minutes"
     text = re.sub(r"(?i)^\s*(?:\d+\s*(?:hours?|hrs?|minutes?|mins?)\s*)+\s*$", "", text, flags=re.MULTILINE)
     
-    # Inline time ranges e.g. "09:00 AM - 05:00 PM" or "(7 Hours)"
     text = re.sub(r"\b\d{1,2}[:.]\d{2}\s*(?:am|pm)?\s*[\u2013\u2014\-]\s*\d{1,2}[:.]\d{2}\s*(?:am|pm)?\b", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"\(\s*\d+\s*(?:hour|hours|hr|hrs|minute|minutes|min|mins)\s*\)", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\(\s*\d+\s*(?:hour\vert{}hours\vert{}hr\vert{}hrs\vert{}minute\vert{}minutes\vert{}min\vert{}mins)\s*\)", "", text, flags=re.IGNORECASE)
 
-    # ------------------------------------------------------------------
-    # 4. CLEAN OCR SYMBOL ARTIFACTS & FORMATTING NOISE
-    # ------------------------------------------------------------------
-    # Replace weird bullet/OCR characters (e.g. ¢, \f-, ™) with clean text
     text = re.sub(r"[¢\f\f-]", "", text)
-    # Remove standalone 1-2 character garbage lines (e.g., 'g', 'aS', 'oo ;')
     text = re.sub(r"^\s*[a-zA-Z0-9;.,\-_]{1,2}\s*$", "", text, flags=re.MULTILINE)
 
-    # ------------------------------------------------------------------
-    # 5. DEDUPLICATE LINES & CLEAN BLANK LINES
-    # ------------------------------------------------------------------
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     
-    # Remove exact duplicate consecutive lines (common in slide titles)
     cleaned_lines = []
     for line in lines:
         if not cleaned_lines or line.lower() != cleaned_lines[-1].lower():
             cleaned_lines.append(line)
 
     cleaned = "\n".join(cleaned_lines)
-
-    # Cap to max characters
     return cleaned[:12000]
 
 
@@ -191,10 +170,10 @@ def clean_title_output(raw_title: str) -> str:
     clean = re.sub(r"('|\b’)([A-Z])\b", lambda m: m.group(1) + m.group(2).lower(), clean)
     return clean
 
+
 def fix_acronym_casing(text: str) -> str:
     acronyms = ["AI", "PLC", "ISO", "DMAIC", "HRDF", "GRI", "SASB", "TCFD", "CMMS", "EOQ"]
     for acronym in acronyms:
-        # Replaces word boundary matches like \bPlc\b or \bAi\b with proper uppercase
         text = re.sub(rf"\b{acronym}\b", acronym, text, flags=re.IGNORECASE)
     return text
 
@@ -247,12 +226,21 @@ def generate_title_llm(model_config: dict, cleaned_text: str, max_retries: int =
 def main():
     print("🚀 Starting Hybrid Parallel Batch Title Generation Pipeline...")
 
-    catalog = load_catalog(CATALOG_PATH)
+    catalog = load_json_file(CATALOG_PATH)
     catalog_dict = {
         str(item["course_id"]): item
         for item in catalog
         if "course_id" in item
     }
+
+    # Load edge cases mapping (course_id -> content string)
+    edge_cases_list = load_json_file(EDGE_CASES_PATH)
+    edge_cases_dict = {
+        str(item["course_id"]): item.get("Content") or item.get("content", "")
+        for item in edge_cases_list
+        if "course_id" in item
+    }  #[cite: 2]
+    print(f"📌 Loaded {len(edge_cases_dict)} edge case content overrides.")
 
     pdf_files = list(PDF_DIR.rglob("*.pdf"))
     print(f"✅ Loaded {len(pdf_files)} clean PDF files from '{PDF_DIR.name}'.")
@@ -288,28 +276,38 @@ def main():
         matched_item = catalog_dict[target_id]
         original_title = matched_item.get("title", "")
 
-        matched_pdf = find_matching_pdf(target_id, original_title, pdf_files)
-        if not matched_pdf:
-            print(f"⚠️ [{idx}/{len(target_ids)}] PDF not found for ID: {target_id}")
-            continue
+        # --- EDGE CASE CHECK ---
+        if target_id in edge_cases_dict:
+            print(f"⚙️ [{idx}/{len(target_ids)}] ID: {target_id} found in edgeCases.json. Using direct content.")
+            pdf_filename = "N/A (JSON Edge Case)"
+            raw_text = edge_cases_dict[target_id]  # Read directly from JSON content attribute[cite: 2]
+        else:
+            matched_pdf = find_matching_pdf(target_id, original_title, pdf_files)
+            if not matched_pdf:
+                print(f"⚠️ [{idx}/{len(target_ids)}] PDF not found for ID: {target_id}")
+                continue
 
-        raw_text = extract_raw_pdf_text(matched_pdf)
+            pdf_filename = matched_pdf.name
+            raw_text = extract_raw_pdf_text(matched_pdf)
+
         cleaned_text = global_noise_cleaner(raw_text)
 
-        check_window = cleaned_text[:4000].lower()
-        match_score = fuzz.partial_ratio(original_title.lower(), check_window)
-        
-        if match_score < 45:
-            print(f"\n⚠️ [{idx}/{len(target_ids)}] MISMATCH GUARD TRIGGERED for ID: {target_id}")
-            print(f"   Catalog Title: '{original_title}' vs PDF File: '{matched_pdf.name}' (Score: {match_score:.1f})")
-            print("   ⏩ Skipping generation to prevent invalid output.\n")
-            continue
+        # Mismatch check only applies to normal PDF extractions
+        if target_id not in edge_cases_dict:
+            check_window = cleaned_text[:4000].lower()
+            match_score = fuzz.partial_ratio(original_title.lower(), check_window)
+            
+            if match_score < 45:
+                print(f"\n⚠️ [{idx}/{len(target_ids)}] MISMATCH GUARD TRIGGERED for ID: {target_id}")
+                print(f"   Catalog Title: '{original_title}' vs PDF File: '{pdf_filename}' (Score: {match_score:.1f})")
+                print("   ⏩ Skipping generation to prevent invalid output.\n")
+                continue
 
         print(f"\n[{idx}/{len(target_ids)}] ID: {target_id} | Original Title: {original_title}")
 
         row_data = {
             "id": target_id,
-            "pdf_file": matched_pdf.name,
+            "pdf_file": pdf_filename,
             "original_title": original_title,
             "extracted_content_sample": cleaned_text[:4000],
         }
