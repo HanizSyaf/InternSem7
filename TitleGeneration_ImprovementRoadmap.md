@@ -1,512 +1,351 @@
-# Title Generation Pipeline - Planned Improvements Roadmap
-
-## Project Context
-Current system processes 168 PDF course documents and generates suggested course titles using multiple LLMs (Ollama + OpenRouter).
-
-Current strengths:
-- OCR fallback using Tesseract
-- PDF text extraction via PyMuPDF
-- Parallel/cloud model execution
-- Noise cleaning
-- Fuzzy matching protection
-- Batch processing
-- Resume capability through CSV output
+# Title Generation & Course Intelligence Platform
+## Architecture and Improvement Roadmap v2
 
 ---
 
-# High-Priority Improvements
+# 1. Project Goal
 
-## 1. Existing PDF Title Detection
+Current Objective:
 
-### Current Gap
-The system generates titles only from extracted text.
+Process approximately 168 course PDFs and generate high-quality course titles using local and cloud LLMs.
 
-It does NOT currently check:
-- PDF metadata title
-- Cover-page title
-- Main heading
-- Course title already printed inside the PDF
+Future Objective:
 
-### Recommended Solution
+Create a reusable content intelligence pipeline that can:
 
-#### Source 1: PDF Metadata
+- Extract course information
+- Detect existing titles
+- Generate improved titles
+- Classify courses
+- Produce keywords and metadata
+- Support recommendation systems
+- Support semantic search
+- Support future RAG implementations
 
-Use:
+---
 
-```python
-meta = doc.metadata
-pdf_title = meta.get("title", "")
-```
+# 2. Current Challenges
 
-Store:
+Current workflow:
 
-```text
-pdf_metadata_title
-```
+PDF
+ ↓
+Extraction
+ ↓
+Cleaning
+ ↓
+LLM
+ ↓
+CSV
 
-#### Source 2: Cover Page Heading
+Problems:
 
-Replace:
+- Extraction and generation tightly coupled
+- Existing titles are often ignored
+- OCR quality not measured
+- Headers and footers add noise
+- Document structure is lost
+- Difficult to benchmark models
+- Difficult to rerun only one stage
 
-```python
-page.get_text("text")
-```
+---
 
-with:
+# 3. Proposed Architecture
 
-```python
-page.get_text("dict")
-```
+Stage 1
+PDF Intelligence Extraction
+
+↓
+
+Stage 2
+Content Repository
+
+↓
+
+Stage 3
+Title Generation
+
+↓
+
+Stage 4
+Evaluation & Validation
+
+↓
+
+Stage 5
+Recommendation & Search Layer
+
+---
+
+# 4. Stage 1 - PDF Intelligence Extraction
+
+Purpose:
+
+Create a high-quality structured representation of every PDF.
+
+Output:
+
+JSON
+
+Example:
+
+{
+    "file": "course123.pdf",
+    "pdf_metadata_title": "",
+    "cover_page_title": "",
+    "overview": "",
+    "objectives": "",
+    "learning_outcomes": "",
+    "keywords": [],
+    "ocr_used": false,
+    "ocr_quality": "GOOD"
+}
+
+---
+
+## 4.1 PDF Metadata Extraction
 
 Extract:
 
-- largest font size
-- top-most heading
-- first page title blocks
+- Title
+- Subject
+- Author
+- Keywords
+
+Source:
+
+PyMuPDF metadata
 
 Store:
 
-```text
+pdf_metadata_title
+
+---
+
+## 4.2 Existing Course Title Detection
+
+Priority:
+
+Very High
+
+Many PDFs already contain professionally curated titles.
+
+Detect from:
+
+- Metadata
+- Cover page
+- Main heading
+- Large font text
+- First page banner
+
+Store:
+
 cover_page_title
-```
 
-#### Source 3: Filename Analysis
+---
+
+## 4.3 Filename Intelligence
 
 Example:
 
-```text
 FCI-023-Strategic-Procurement.pdf
-```
 
-Generate:
+Extract:
 
-```text
 Strategic Procurement
-```
 
 Store:
 
-```text
 filename_title
-```
-
-### New Title Selection Hierarchy
-
-```text
-PDF Metadata
-      ↓
-Cover Page Title
-      ↓
-Detected Main Heading
-      ↓
-Filename Candidate
-      ↓
-LLM Generated Title
-```
 
 ---
 
-## 2. Structured Content Extraction
+## 4.4 OCR Processing
 
-### Current Situation
+Use:
 
-Current extraction:
+- Native text extraction first
+- OCR fallback only when needed
 
-```python
-page.get_text("text")
-```
+Preferred OCR:
 
-removes document structure.
+- PaddleOCR
+- Tesseract
 
-### Improvement
+Store:
 
-Preserve:
-
-- Course Overview
-- Objectives
-- Learning Outcomes
-- Target Audience
-- Module Contents
-- Benefits
-- Conclusion
-
-Build structured prompts.
-
-Example:
-
-```text
-Overview:
-...
-
-Objectives:
-...
-
-Learning Outcomes:
-...
-```
-
-This usually improves title generation significantly.
+ocr_used
 
 ---
 
-## 3. Repeated Header/Footer Removal
+## 4.5 OCR Quality Scoring
 
-### Current Issue
+Store:
 
-Current cleaner contains Indigo-specific rules.
+ocr_quality_score
 
-Example:
+Measurements:
 
-```text
-WHY CHOOSE US
-ABOUT ELITE INDIGO
-```
+- dictionary ratio
+- word confidence
+- character quality
+- OCR noise ratio
 
-### Improvement
+Ratings:
 
-Automatically detect lines appearing on:
+GOOD
+MEDIUM
+POOR
 
-```text
-50% to 80% of pages
-```
+---
 
-Remove:
+## 4.6 Header and Footer Detection
+
+Automatically remove:
 
 - page numbers
 - company branding
+- repetitive banners
+- website addresses
 - contact details
-- website URLs
-- repeated training advertisements
 
-Result:
+Detect lines repeated across pages.
 
-Cleaner content and better keywords.
+Avoid vendor-specific rules.
 
 ---
 
-## 4. OCR Quality Scoring
+## 4.7 Structural Extraction
 
-### Current Situation
+Preserve sections:
 
-OCR activates when:
+- Overview
+- Objectives
+- Learning Outcomes
+- Course Content
+- Modules
+- Benefits
+- Target Audience
 
-```python
-len(native_text) < 150
-```
+Do not flatten entire document into plain text.
 
-### Additional Detection
+---
+
+## 4.8 Section Weighting
+
+High Value Sections:
+
+1. Title
+2. Overview
+3. Objectives
+4. Learning Outcomes
+5. Target Audience
+
+Low Value Sections:
+
+- Registration
+- Schedule
+- Venue
+- Contact Information
+- Testimonials
+
+---
+
+## 4.9 Keyword Extraction
+
+Extract:
+
+- technical keywords
+- business keywords
+- industry keywords
 
 Store:
 
-```text
-ocr_used
-ocr_quality_score
-```
+keywords
 
-Example checks:
+Benefits:
 
-- dictionary word ratio
-- alphabetic character ratio
-- OCR confidence metrics
-
-Flag weak OCR automatically.
-
----
-
-## 5. Section-Based Content Selection
-
-### Current Situation
-
-Entire content is truncated:
-
-```python
-cleaned_text[:12000]
-```
-
-### Improvement
-
-Prioritize:
-
-```text
-Overview
-Objectives
-Learning Outcomes
-Modules
-Target Audience
-```
-
-Ignore:
-
-```text
-Schedules
-Lunch breaks
-Registration details
-Contact information
-```
-
-Smaller context often produces better titles.
-
----
-
-## 6. Better Prompt Engineering
-
-### Current Prompt
-
-Generate a suitable course title.
-
-### Recommended Prompt
-
-```text
-Step 1:
-Identify:
-- subject domain
-- core skills
-- target audience
-- learning outcomes
-
-Step 2:
-Generate:
-- professional title
-- academic title
-- industry title
-
-Return only the professional title.
-```
-
-Qwen models benefit significantly from explicit reasoning.
-
----
-
-# Model Recommendations
-
-Low:
-- Gemma 3 4B
-
-Moderate:
-- Qwen 3.5 8B or 9B
-
-Advanced:
-- Qwen 3.8 27B
-
-Observation:
-Most quality gains will come from extraction quality rather than moving to larger models.
-
----
-
-# Additional CSV Columns
-
-Recommended additions:
-
-```text
-pdf_metadata_title
-cover_page_title
-filename_title
-extracted_keywords
-ocr_used
-ocr_quality_score
-content_length
-confidence_score
-```
-
----
-
-# Additional Enhancements Identified From Current Script
-
-## Replace Vendor-Specific Cleaning
-
-Current cleaner is tightly coupled to Elite Indigo content.
-
-Create:
-
-```python
-def generic_noise_cleaner():
-```
-
-Use reusable patterns suitable for future datasets.
-
----
-
-## Detect Course Catalog Mismatch Smarter
-
-Current threshold:
-
-```python
-fuzz.partial_ratio() < 45
-```
-
-Improvement:
-
-Combine:
-
-- title similarity
-- keyword similarity
-- detected heading similarity
-
-for better confidence.
-
----
-
-## Add Keyword Extraction Layer
-
-Before title generation:
-
-```text
-PDF
- ↓
-Keywords
- ↓
-Title Generation
-```
-
-Store top keywords.
-
-Useful for:
-
-- recommendation systems
+- better title generation
+- recommendations
 - search
-- course clustering
-- quality validation
+- clustering
 
 ---
 
-## Add Confidence Scoring
+# 5. Stage 2 - Content Repository
 
-Store:
+Purpose:
 
-```text
-confidence_score
-```
+Decouple extraction from generation.
 
-Based on:
+Store structured JSON results.
 
-- title agreement between models
-- keyword overlap
-- detected title similarity
+Example:
 
-Useful when selecting the best generated title.
+project/
 
----
+├── pdf/
+├── extracted/
+├── generated/
+├── evaluation/
+└── reports/
 
-## Future Architecture
+Benefits:
 
-```text
-PDF
- ├─ Metadata Extraction
- ├─ File Name Analysis
- ├─ Cover Title Detection
- ├─ OCR Processing
- ├─ Repeated Header Removal
- ├─ Structure Extraction
- ├─ Keyword Extraction
- ├─ LLM Title Generation
- └─ Confidence Scoring
-
-Output
- ├─ Original Title
- ├─ Metadata Title
- ├─ Cover Title
- ├─ Filename Title
- ├─ Generated Titles
- ├─ Keywords
- ├─ OCR Score
- └─ Confidence Score
-```
-
-
-# Additional Findings from Generated Results Review
+- rerun extraction without LLM
+- rerun LLM without extraction
+- easier debugging
+- lower cost
+- faster experimentation
 
 ---
 
-## 7. Existing Title Preservation
+# 6. Stage 3 - Title Generation
 
-### Observation
+Input:
 
-Many PDFs already contain high-quality, publish-ready titles.
+Extracted JSON
 
-Examples:
-
-Original:
-Leading By Listening
-
-Generated:
-Leading By Listening: Practical Communication Skills For Effective Leadership
-
-Original:
-Microsoft 365 Copilot for Real Work
-
-Generated:
-Microsoft 365 Copilot For Real Workplace Productivity And Prompt Mastery
-
-Original:
-Natural Language Processing: From Fundamentals to Real-World Applications
-
-Generated:
-Natural Language Processing: From Fundamentals To Real-World Applications
-
-In some cases the original title is equal or better than the generated title.
+Not PDF files.
 
 ---
 
-### Improvement
+## 6.1 Title Candidate Sources
 
-Implement title classification before title generation.
+Collect:
 
-Decision flow:
+1. PDF Metadata Title
+2. Cover Page Title
+3. Filename Title
+4. LLM Generated Title
 
-PDF
- ├─ Metadata Title
- ├─ Cover Page Title
- ├─ Existing Course Title
- └─ LLM
-
-Decision:
-
-IF confidence(existing_title) > threshold
-    retain existing title
-ELSE
-    generate alternative title
+Store all candidates.
 
 ---
 
-### Benefits
+## 6.2 Title Decision Hierarchy
 
-- Better catalogue consistency
-- Less model cost
-- Less title drift
-- Easier benchmarking
+Priority:
 
----
+Existing Title
+    ↓
+Cover Title
+    ↓
+Metadata Title
+    ↓
+Filename Title
+    ↓
+LLM Generated Title
 
-## 8. Title Drift Detection
+LLM should become a fallback or enhancement layer.
 
-### Observation
-
-Models frequently expand titles:
-
-Original:
-Workplace Wellness
-
-Generated:
-Mastering Workplace Wellness: Strategies For Burnout Prevention And Resilience
-
-Problem:
-
-Generated title may no longer match:
-
-- course catalogue
-- brochure
-- registration records
-- LMS
+Not the first source.
 
 ---
 
-### Improvement
+## 6.3 Title Preservation Logic
 
-Generate classification:
-
-title_preservation_mode
-
-Values:
+Modes:
 
 EXACT
 MODIFIED
@@ -515,336 +354,318 @@ NEW
 
 Examples:
 
-EXACT:
-Microsoft 365 Copilot for Real Work
+EXACT
 
-ENHANCED:
-Leading By Listening
-→ Leading By Listening: Practical Leadership Communication
+Leadership Essentials
 
-NEW:
-when no usable title exists
+MODIFIED
 
----
+Leadership Essentials
+→ Modern Leadership Essentials
 
-## 9. Duplicate Course Detection
+ENHANCED
 
-### Observation
+Leadership Essentials
+→ Leadership Essentials for High Performance Teams
 
-Several files appear to be:
+NEW
 
-- revisions
-- variants
-- duplicate course versions
-
-Examples:
-
-ISO 9001 Awareness
-ISO 9001:2015 Awareness Training
-
-Growth Mindset
-Growth Mindset 2
-
-Tufting Adventure
-Tufting Adventure (Hotel)
+Generated only when no title exists.
 
 ---
 
-### Improvement
+## 6.4 Prompt Engineering
 
-Add duplicate detection:
+Recommended Prompt:
 
-fuzzy_title_similarity
+Step 1
 
-course_cluster_id
-
-Potential use:
-
-- recommendation engines
-- content deduplication
-- LMS migration
-- curriculum mapping
-
----
-
-## 10. Domain Classification Layer
-
-### Observation
-
-Generated titles alone are insufficient.
-
-Future recommendation systems need:
+Identify:
 
 - domain
-- category
+- core skills
 - audience
+- learning outcomes
+
+Step 2
+
+Generate:
+
+- professional title
+- academic title
+- industry title
+
+Return professional title only.
 
 ---
 
-### Example
+## 6.5 Recommended Models
 
-Title:
-AI Enhanced Root Cause Analysis for Manufacturing Excellence
+Low
 
-Domain:
-Manufacturing
+Gemma 3 4B
 
-SubDomain:
-Quality Engineering
+Moderate
 
-Audience:
-Engineers
+Qwen 3.5 8B or 9B
 
-Difficulty:
-Intermediate
+Advanced
 
-Keywords:
-RCA
-Fishbone
-5 Whys
-AI
+Qwen 3.8 27B
+
+Observation:
+
+Extraction quality contributes more than model size.
 
 ---
 
-### Recommended Output Columns
+# 7. Stage 4 - Evaluation Layer
 
-domain
-subcategory
-audience
-difficulty
-keywords
+Purpose:
+
+Measure output quality objectively.
 
 ---
 
-## 11. Course Taxonomy Builder
+## 7.1 Confidence Scoring
 
-### Observation
+Store:
 
-The dataset naturally clusters into groups:
+confidence_score
 
-AI
-Leadership
-Communication
-Manufacturing
-Quality
-Data Science
-Power Platform
-Maintenance
-Food Safety
-ISO
-Team Building
+Based on:
+
+- keyword overlap
+- title similarity
+- model agreement
+- structural consistency
 
 ---
 
-### Future Enhancement
+## 7.2 Consensus Scoring
 
-Create automatic taxonomy generation.
+Multiple models:
 
-Example:
-
-AI
- ├─ AI Fundamentals
- ├─ Prompt Engineering
- ├─ LLM
- ├─ Copilot
- └─ Generative AI
-
-Quality
- ├─ SPC
- ├─ MSA
- ├─ FMEA
- ├─ APQP
- └─ IATF
-
-Benefits:
-
-- recommendation systems
-- search
-- analytics
-- course discovery
-
----
-
-## 12. Multi-Model Consensus Scoring
-
-### Observation
-
-Current output stores:
-
-- Llama
+- Gemma
 - Qwen
-- Qwen 27B
-- Nemotron
-- GPT-4o Mini
+- Llama
+- Mistral
+- GPT
 
-This is valuable data.
-
----
-
-### Improvement
-
-Create:
+Generate:
 
 consensus_score
 
-Example:
+Ratings:
 
-If 4 of 5 models generate similar title:
-
-Consensus:
 HIGH
-
-If every model generates different title:
-
-Consensus:
+MEDIUM
 LOW
 
 ---
 
-### Formula
+## 7.3 Course Mismatch Detection
 
-title_similarity_average
+Current:
 
-keyword_overlap
+Fuzzy title comparison
 
-semantic_similarity
+Future:
+
+Combine:
+
+- title similarity
+- heading similarity
+- keyword similarity
 
 ---
 
-### Output
+## 7.4 Duplicate Detection
 
-consensus_score
-title_confidence
+Identify:
+
+- duplicate courses
+- revised courses
+- versioned courses
+
+Store:
+
+course_cluster_id
+
+Applications:
+
+- content cleanup
+- curriculum mapping
+- recommendations
 
 ---
 
-## 13. OCR Failure Detection
+# 8. Stage 5 - Course Intelligence Layer
 
-### Observation
+Future roadmap.
 
-Several PDFs contain OCR artifacts:
+---
+
+## 8.1 Domain Classification
 
 Examples:
 
-G invico
-Nn |f
-Random symbols
-Broken spacing
+AI
+
+Leadership
+
+Manufacturing
+
+Data Science
+
+Power Platform
+
+Quality
+
+HR
+
+Cybersecurity
+
+Store:
+
+domain
+
+subcategory
 
 ---
 
-### Improvement
+## 8.2 Audience Classification
 
-Measure:
+Store:
 
-ocr_noise_score
-
-Indicators:
-
-- abnormal character ratio
-- dictionary word ratio
-- repeated OCR artifacts
-
----
-
-### Output
-
-ocr_quality
-
-GOOD
-MEDIUM
-POOR
+- Executive
+- Manager
+- Supervisor
+- Engineer
+- Analyst
+- General Employee
 
 ---
 
-## 14. Section Ranking Engine
+## 8.3 Difficulty Classification
 
-Current extraction sends huge blocks of text.
+Store:
 
-Not all sections contribute equally.
-
----
-
-### High-value sections
-
-1. Cover title
-2. Executive summary
-3. Program overview
-4. Learning objectives
-5. Target audience
+BEGINNER
+INTERMEDIATE
+ADVANCED
 
 ---
 
-### Low-value sections
+## 8.4 Course Taxonomy
 
-- trainer profile
-- testimonials
-- registration
-- schedule
-- venue
-- contact information
+Example:
 
----
+Quality
 
-### Improvement
+├── SPC
+├── MSA
+├── FMEA
+├── APQP
+└── IATF
 
-Weighted section extraction
+AI
 
-Instead of:
-
-12000 character dump
-
-Use:
-
-Title = 35%
-Overview = 30%
-Objectives = 20%
-Audience = 10%
-Keywords = 5%
-
-This improves title quality significantly.
+├── AI Fundamentals
+├── Prompt Engineering
+├── Copilot
+├── LLM
+└── GenAI
 
 ---
 
-## 15. Recommendation-System Readiness
+## 8.5 Recommendation Readiness
 
-Future-proof output structure.
-
-Add:
+Store:
 
 course_id
+
 title
+
 keywords
+
 domain
+
 subcategory
+
 audience
+
 difficulty
+
 learning_outcomes
-embedding
+
 cluster_id
 
-This makes future:
+embedding
 
-- semantic search
+This supports:
+
+- search
+- recommendations
 - RAG
-- recommendation engines
-- personalized learning paths
-
-much easier to build.
+- learning pathways
 
 ---
 
-# Improvement Priority Ranking
+# 9. Recommended Development Priority
 
-1. Detect Existing Course Title and cover-page title extraction
-2. Structured section extraction
-3. Automatic header/footer removal
-4. OCR quality scoring
-5. Metadata title extraction
-6. Keyword extraction layer
-7. Confidence scoring
-8. Larger LLM models
+Phase 1
 
-Expected benefit:
+✅ Separate Extraction and Generation
 
-The first four improvements will likely contribute more title quality improvement than upgrading from a 9B model to a 27B model.
+✅ Existing Course Title Detection
+
+✅ Cover Page Title Extraction
+
+✅ Metadata Extraction
+
+---
+
+Phase 2
+
+✅ Header/Footer Detection
+
+✅ OCR Quality Scoring
+
+✅ Structured Section Extraction
+
+✅ Keyword Extraction
+
+---
+
+Phase 3
+
+✅ Confidence Scoring
+
+✅ Consensus Scoring
+
+✅ Duplicate Detection
+
+✅ Domain Classification
+
+---
+
+Phase 4
+
+✅ Taxonomy Builder
+
+✅ Recommendation Engine
+
+✅ Vector Search
+
+✅ RAG Integration
+
+---
+
+# Key Principle
+
+For this project:
+
+Better extraction > Better prompts > Bigger models
+
+A well-structured extraction pipeline using Qwen 9B will often outperform a poor extraction pipeline using Qwen 27B.
